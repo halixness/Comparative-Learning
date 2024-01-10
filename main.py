@@ -19,10 +19,10 @@ from dataset import *
 from models import *
 
 random.seed(1337)
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = "cuda:1" if torch.cuda.is_available() else "cpu"
 wandb_run = None
 
-def my_train_clip_encoder(dt, model, attr, lesson, memory):
+def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch):
 
 	# get model
 	clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
@@ -37,9 +37,9 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory):
 	
 	centroid_sim = torch.rand(1, latent_dim).to(device)
 
-	while ct <= 5:
+	while ct < 1:
 		ct += 1
-		progressbar = tqdm(range(200))
+		progressbar = tqdm(range(100))
 		for i in progressbar:
 			# Get Inputs: sim_batch, (sim_batch, 4, 128, 128)
 			base_name_sim, images_sim = dt.get_better_similar(attr, lesson)
@@ -63,6 +63,9 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory):
 			loss_dif = get_sim_not_loss(centroid_sim, z_dif)
 
 			# compute loss
+			# loss_sim in [0, 0.15]
+			# loss_dif in [0.5, 1.5]
+			# loss_reg in [0.005, 0.015] => [0.05, 0.15]
 			loss = (loss_sim)**2 + (loss_dif-1)**2
 
 			log = {
@@ -73,9 +76,9 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory):
 
 			if len(memory.keys()) > 0:  # hyper-output regularization
 				regularizer_loss = compute_regularizer_loss(model, memory)
-				loss += regularizer_loss
-				log["regularizer_loss"] = regularizer_loss.detach().item()
-				log["loss"] = loss.detach().item()
+				loss += beta_reg * regularizer_loss
+				log["train/regularizer_loss"] = beta_reg * regularizer_loss.detach().item()
+				log["train/loss"] = loss.detach().item()
 
 			progressbar.set_description(f"loss: {loss.item():.2f}")
 			optimizer.zero_grad()
@@ -107,7 +110,7 @@ def compute_regularizer_loss(model:HyperMem, memory:dict) -> th.Tensor:
 		new_params = model.get_weights(lesson)
 		task_loss = None
 		for k in old_params.keys(): # for each param
-			loss = F.mse_loss(old_params[k], new_params[k])
+			loss = F.mse_loss(old_params[k], new_params[k], reduction="sum")
 			if task_loss is None: task_loss = loss
 			else: task_loss += loss
 		if loss is None: loss = task_loss
@@ -115,7 +118,7 @@ def compute_regularizer_loss(model:HyperMem, memory:dict) -> th.Tensor:
 	return torch.mean(loss)
 		
 
-def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memory):
+def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memory, epoch):
 	with torch.no_grad():
 		# get vocab dictionary
 		if source == 'train':
@@ -193,7 +196,8 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 				"test/top3_material": top3_material/tot_num,
 				"test/top3_shape": top3_shape/tot_num,
 				"test/top3": top3/tot_num,
-				"learned_concepts": len(memory.keys())
+				"learned_concepts": len(memory.keys()),
+				"epoch": epoch
 			})
 		print(tot_num, top3_color/tot_num, top3_material/tot_num,
 				top3_shape/tot_num, top3/tot_num)
@@ -213,27 +217,29 @@ def my_clip_train(in_path, out_path, model_name, source, in_base,
 	best_nt = 0
 	t_tot = 0
 	memory = {}
-	for i in range(epochs):
-		for tl in types_learning:  # attr
-			random.shuffle(dic[tl])
-			for vi in dic[tl]:  # lesson
-				# Train
-				print("#################### Learning: " + str(i) + " ----- " + str(vi))
-				t_start = time.time()
-				model = my_train_clip_encoder(dt, model, tl, vi, memory)
-				t_end = time.time()
-				t_dur = t_end - t_start
-				t_tot += t_dur
-				print("Time: ", t_dur, t_tot)
 
-				# Evaluate
-				top_nt = my_clip_evaluation(in_path, 'novel_test/', model,
-								bsn_novel_test_1, ['rgba'], dic_train, vocab, memory)
-				if top_nt > best_nt:
-					best_nt = top_nt
-					print("++++++++++++++ BEST NT: " + str(best_nt))
-					# with open(os.path.join(out_path, model_name), 'wb') as handle:
-					#	pickle.dump(memory, handle, protocol=pickle.HIGHEST_PROTOCOL)
+	notions = [(k, l) for k in types_learning for l in dic[k]]
+	random.shuffle(notions)
+
+	for i in range(epochs):
+		for tl, vi in notions:  # lesson
+			# Train
+			print("#################### Learning: " + str(i) + " ----- " + str(vi))
+			t_start = time.time()
+			model = my_train_clip_encoder(dt, model, tl, vi, memory, i)
+			t_end = time.time()
+			t_dur = t_end - t_start
+			t_tot += t_dur
+			print("Time: ", t_dur, t_tot)
+
+			# Evaluate
+			top_nt = my_clip_evaluation(in_path, 'novel_test/', model,
+							bsn_novel_test_1, ['rgba'], dic_train, vocab, memory, i)
+			if top_nt > best_nt:
+				best_nt = top_nt
+				print("++++++++++++++ BEST NT: " + str(best_nt))
+				# with open(os.path.join(out_path, model_name), 'wb') as handle:
+				#	pickle.dump(memory, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 if __name__ == "__main__":
@@ -248,6 +254,7 @@ if __name__ == "__main__":
 				help='Pretrained model import name (saved in outpath)', required=False)
 	args = argparser.parse_args()
 
+	"""
 	wandb.login()
 	config = {
 		"lr": lr,
@@ -255,10 +262,12 @@ if __name__ == "__main__":
 		"gen_batch": gen_batch,
 		"epochs": epochs,
 		"batch_size": batch_size,
-		"latent_dim": latent_dim
+		"latent_dim": latent_dim,
+		"beta_reg": beta_reg
 	}
-	wandb_run = wandb.init(name="hypernet_regularized", project="hypernet-concept-learning", config=config)
-	
+	wandb_run = wandb.init(name="hypernet_regularized_shuffled", project="hypernet-concept-learning", config=config)
+	"""
+
 	my_clip_train(args.in_path, args.out_path, args.model_name,
 				'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train)
 

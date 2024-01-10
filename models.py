@@ -146,17 +146,13 @@ class HyperMem(Model):
         with th.no_grad():
             t_notion = self.bert_tokenizer(notion, return_tensors="pt").to(self._d.device)
             e_notion = self.bert(t_notion.input_ids).last_hidden_state[:, 0]
-        k = F.relu(self.embedding(e_notion)) # 1, 128
+            k = F.relu(self.embedding(e_notion)) # 1, 128
         # HyperNet
         w_filt = self.filter(k)
-        w_embedding1 = self.embedding[0].weight
-        w_embedding2 = self.embedding[1].weight
         w_enc1, bias_enc1 = self.encoder.hyper_encoder_1.get_weights(k)
         w_enc2, bias_enc2 = self.encoder.hyper_encoder_2.get_weights(k)
         return {
             "filter": w_filt,
-            "embedding1": w_embedding1,
-            "embedding2": w_embedding2,
             "encoder1": w_enc1,
             "bias_enc1": bias_enc1,
             "encoder2": w_enc2,
