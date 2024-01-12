@@ -41,8 +41,6 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch):
 	loss_dif = None
 	loss = 10
 	ct = 0
-	
-	centroid_sim = torch.rand(1, latent_dim).to(device)
 
 	while ct <= lesson_iterations:
 		ct += 1
@@ -55,9 +53,9 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch):
 				emb = clip_model.encode_image(images_sim).float() # B, 512
 
 			# run similar model
-			z_sim = model(lesson, emb)
-			centroid_sim = centroid_sim.detach()
-			centroid_sim, loss_sim = get_sim_loss(torch.vstack((z_sim, centroid_sim)))
+			z_sim, centroid_sim = model(lesson, emb)
+			centroid_sim = centroid_sim.squeeze(0)
+			loss_sim = h_get_sim_loss(z_sim, centroid_sim)
 
 			# Run Difference
 			base_name_dif, images_dif = dt.get_better_similar_not(attr, lesson)
@@ -66,7 +64,7 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch):
 				emb = clip_model.encode_image(images_dif).float() # B, 512
 
 			# run difference model
-			z_dif = model(lesson, emb)
+			z_dif, _ = model(lesson, emb)
 			loss_dif = get_sim_not_loss(centroid_sim, z_dif)
 
 			# compute loss
@@ -101,8 +99,7 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch):
 		
 	############ save model #########
 	with torch.no_grad():
-		memory[lesson] = {"centroid": centroid_sim}
-		memory[lesson]["params"] = model.get_weights(lesson) # (L)
+		memory[lesson] = {"params": model.get_weights(lesson)} # (L)
 	return model, memory
 
 def compute_regularizer_loss(model:HyperMem, memory:dict) -> th.Tensor:
@@ -164,9 +161,8 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 					emb = clip_model.encode_image(images).float() # B, 512
 
 				# compute stats
-				z = model(label, emb)
+				z, centroid_i = model(label, emb)
 				z = z.squeeze(0)
-				centroid_i = memory[label]["centroid"]
 				centroid_i = centroid_i.repeat(batch_size_i, 1)
 				disi = ((z - centroid_i)**2).mean(dim=1)
 				ans.append(disi.detach().to('cpu'))
@@ -219,8 +215,7 @@ def my_clip_train(in_path, out_path, model_name, source, in_base,
 
 	# load encoder models from memory
 	model = HyperMem(lm_dim=768, knob_dim=128, input_dim=512, hidden_dim=128, output_dim=latent_dim).to(device)
-	print(f"# Params: {count_parameters(model)}")
-	print(f"LR: {lr}")
+	print(f"[-] #params: {count_parameters(model)}")
 
 	best_nt = 0
 	t_tot = 0
