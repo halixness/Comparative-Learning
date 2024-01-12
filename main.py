@@ -19,7 +19,7 @@ from dataset import *
 from models import *
 
 random.seed(1337)
-device = "cuda:1" if torch.cuda.is_available() else "cpu"
+device = "cuda" if torch.cuda.is_available() else "cpu"
 wandb_run = None
 
 def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch):
@@ -27,7 +27,14 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch):
 	# get model
 	clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
 	
-	optimizer = optim.Adam(model.parameters(), lr=lr)
+	# It is more stable
+	optimizer = optim.Adam([
+		# model.filter
+		# model.embedding
+		{'params': model.encoder.parameters(), 'lr': 1e-4}
+	], lr=1e-3)
+	# optimizer = optim.Adam(model.parameters(), lr=1e-4)
+
 	model.train()
 
 	loss_sim = None
@@ -37,9 +44,9 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch):
 	
 	centroid_sim = torch.rand(1, latent_dim).to(device)
 
-	while ct < 1:
+	while ct <= lesson_iterations:
 		ct += 1
-		progressbar = tqdm(range(100))
+		progressbar = tqdm(range(200))
 		for i in progressbar:
 			# Get Inputs: sim_batch, (sim_batch, 4, 128, 128)
 			base_name_sim, images_sim = dt.get_better_similar(attr, lesson)
@@ -48,7 +55,7 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch):
 				emb = clip_model.encode_image(images_sim).float() # B, 512
 
 			# run similar model
-			z_sim, _ = model(lesson, emb)
+			z_sim = model(lesson, emb)
 			centroid_sim = centroid_sim.detach()
 			centroid_sim, loss_sim = get_sim_loss(torch.vstack((z_sim, centroid_sim)))
 
@@ -59,7 +66,7 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch):
 				emb = clip_model.encode_image(images_dif).float() # B, 512
 
 			# run difference model
-			z_dif, _ = model(lesson, emb)
+			z_dif = model(lesson, emb)
 			loss_dif = get_sim_not_loss(centroid_sim, z_dif)
 
 			# compute loss
@@ -71,7 +78,9 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch):
 			log = {
 				"train/loss": loss.detach().item(),
 				"train/loss_sim": loss_sim.detach().item(),
-				"train/loss_dif": loss_dif.detach().item()
+				"train/loss_dif": loss_dif.detach().item(),
+				"epoch": epoch,
+				"centroid": torch.mean(centroid_sim)
 			}
 
 			if len(memory.keys()) > 0:  # hyper-output regularization
@@ -85,6 +94,7 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch):
 			loss.backward()
 			optimizer.step()
 			if wandb_run: wandb_run.log(log)
+			else: print(log)
 
 		print('[', ct, ']', loss.detach().item(), loss_sim.detach().item(),
 				loss_dif.detach().item())
@@ -92,8 +102,8 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch):
 	############ save model #########
 	with torch.no_grad():
 		memory[lesson] = {"centroid": centroid_sim}
-		memory[lesson]["params"] = model.get_weights(lesson)
-	return model
+		memory[lesson]["params"] = model.get_weights(lesson) # (L)
+	return model, memory
 
 def compute_regularizer_loss(model:HyperMem, memory:dict) -> th.Tensor:
 	"""
@@ -104,18 +114,14 @@ def compute_regularizer_loss(model:HyperMem, memory:dict) -> th.Tensor:
 		Outputs:
 			loss:th.Tensor		mean task weight loss
 	"""
-	loss = None
+	# print(f"Computing loss for: {list(memory.keys())}")
+	task_loss = 0
 	for lesson, val in memory.items(): # for each old task
-		old_params = val["params"]
-		new_params = model.get_weights(lesson)
-		task_loss = None
-		for k in old_params.keys(): # for each param
-			loss = F.mse_loss(old_params[k], new_params[k], reduction="sum")
-			if task_loss is None: task_loss = loss
-			else: task_loss += loss
-		if loss is None: loss = task_loss
-		else: loss = torch.hstack((loss, task_loss))
-	return torch.mean(loss)
+		old_params = val["params"] # (L)
+		new_params = model.get_weights(lesson) # (L)
+		# task_loss += (old_params - new_params).pow(2).sum()
+		task_loss += F.huber_loss(new_params, old_params, reduction="sum")
+	return torch.mean(task_loss)
 		
 
 def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memory, epoch):
@@ -158,7 +164,7 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 					emb = clip_model.encode_image(images).float() # B, 512
 
 				# compute stats
-				z, _ = model(label, emb)
+				z = model(label, emb)
 				z = z.squeeze(0)
 				centroid_i = memory[label]["centroid"]
 				centroid_i = centroid_i.repeat(batch_size_i, 1)
@@ -213,33 +219,33 @@ def my_clip_train(in_path, out_path, model_name, source, in_base,
 
 	# load encoder models from memory
 	model = HyperMem(lm_dim=768, knob_dim=128, input_dim=512, hidden_dim=128, output_dim=latent_dim).to(device)
+	print(f"# Params: {count_parameters(model)}")
+	print(f"LR: {lr}")
 
 	best_nt = 0
 	t_tot = 0
 	memory = {}
-
-	notions = [(k, l) for k in types_learning for l in dic[k]]
-	random.shuffle(notions)
-
 	for i in range(epochs):
-		for tl, vi in notions:  # lesson
-			# Train
-			print("#################### Learning: " + str(i) + " ----- " + str(vi))
-			t_start = time.time()
-			model = my_train_clip_encoder(dt, model, tl, vi, memory, i)
-			t_end = time.time()
-			t_dur = t_end - t_start
-			t_tot += t_dur
-			print("Time: ", t_dur, t_tot)
+		for tl in types_learning:  # attr
+			random.shuffle(dic[tl])
+			for vi in dic[tl]:  # lesson
+				# Train
+				print("#################### Learning: " + str(i) + " ----- " + str(vi))
+				t_start = time.time()
+				model, memory = my_train_clip_encoder(dt, model, tl, vi, memory, i)
+				t_end = time.time()
+				t_dur = t_end - t_start
+				t_tot += t_dur
+				print("Time: ", t_dur, t_tot)
 
-			# Evaluate
-			top_nt = my_clip_evaluation(in_path, 'novel_test/', model,
-							bsn_novel_test_1, ['rgba'], dic_train, vocab, memory, i)
-			if top_nt > best_nt:
-				best_nt = top_nt
-				print("++++++++++++++ BEST NT: " + str(best_nt))
-				# with open(os.path.join(out_path, model_name), 'wb') as handle:
-				#	pickle.dump(memory, handle, protocol=pickle.HIGHEST_PROTOCOL)
+				# Evaluate
+				top_nt = my_clip_evaluation(in_path, 'novel_test/', model,
+								bsn_novel_test_1, ['rgba'], dic_train, vocab, memory, i)
+				if top_nt > best_nt:
+					best_nt = top_nt
+					print("++++++++++++++ BEST NT: " + str(best_nt))
+					# with open(os.path.join(out_path, model_name), 'wb') as handle:
+					#	pickle.dump(memory, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 if __name__ == "__main__":
@@ -252,22 +258,31 @@ if __name__ == "__main__":
 				help='Best model memory to be saved file name', required=False)
 	argparser.add_argument('--pre_train', '-p', default=None,
 				help='Pretrained model import name (saved in outpath)', required=False)
+	argparser.add_argument('--wandb', '-w', default=False, type=bool,
+				help='Enable wandb')
+	argparser.add_argument('--run_name', '-r', default="hypernet", type=str,
+				help='Wandb run name')
+	argparser.add_argument('--device', '-d', default="cuda", type=str,
+				help='Device')
+	argparser.add_argument('--lesson_iterations', '-ct', default=4, type=int,
+				help='Iterations per concept')
 	args = argparser.parse_args()
+	
+	lesson_iterations = args.lesson_iterations
 
-	"""
-	wandb.login()
-	config = {
-		"lr": lr,
-		"sim_batch": sim_batch,
-		"gen_batch": gen_batch,
-		"epochs": epochs,
-		"batch_size": batch_size,
-		"latent_dim": latent_dim,
-		"beta_reg": beta_reg
-	}
-	wandb_run = wandb.init(name="hypernet_regularized_shuffled", project="hypernet-concept-learning", config=config)
-	"""
-
+	if args.wandb:
+		wandb.login()
+		config = {
+			"lr": lr,
+			"sim_batch": sim_batch,
+			"gen_batch": gen_batch,
+			"epochs": epochs,
+			"batch_size": batch_size,
+			"latent_dim": latent_dim,
+			"beta_reg": beta_reg
+		}
+		wandb_run = wandb.init(name=args.run_name, project="hypernet-concept-learning", config=config)
+		
 	my_clip_train(args.in_path, args.out_path, args.model_name,
 				'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train)
 

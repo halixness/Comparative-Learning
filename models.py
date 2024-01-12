@@ -18,6 +18,8 @@ from transformers import BertTokenizer, BertModel
 from config import *
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 class CLIP_AE_Encode(nn.Module):
 	def __init__(self, hidden_dim, latent_dim, isAE=False):
@@ -62,7 +64,11 @@ class HyperMLP(Model):
         self.in_dim = input_dim
         self.out_dim = output_dim
         self.bias = bias
-        self.ff = nn.Linear(knob_dim, input_dim*output_dim)
+        self.ff = nn.Sequential(
+            nn.Linear(knob_dim, input_dim),
+            nn.Linear(input_dim, output_dim),
+            nn.Linear(output_dim, input_dim*output_dim)
+        )
         if self.bias: self.b = nn.Parameter(th.zeros((output_dim)))
         self.apply(self._init_weights)
 
@@ -73,8 +79,8 @@ class HyperMLP(Model):
             Outputs:
                 w:th.Tensor             predicted MLP weights (1, in_dim*out_dim)
         """
-        w = [self.ff(k)]
-        if self.bias: w.append(self.b) 
+        w = self.ff(k).view(-1)
+        if self.bias: w = torch.hstack((w, self.b.view(-1))) 
         return w
 
     def forward(self, k:th.Tensor, x:th.Tensor) -> th.tensor:
@@ -85,7 +91,7 @@ class HyperMLP(Model):
             Outputs:
                 h:th.Tensor             encoded examples of the form (B, H')
         """
-        W = self.ff(k).reshape((self.out_dim, self.in_dim)) # H', H
+        W = self.ff(k).view(self.out_dim, self.in_dim) # H', H
         h = (x @ th.t(W)) # B, H'
         if self.bias: h += self.b.repeat(h.shape[0], 1)
         return h
@@ -95,9 +101,14 @@ class HyperEncoder(Model):
 
     def __init__(self, knob_dim:int=128, input_dim:int=512, hidden_dim:int=128, output_dim:int=16):
         super(HyperEncoder, self).__init__()
-        self.hyper_encoder_1 = HyperMLP(knob_dim=knob_dim, input_dim=input_dim, output_dim=hidden_dim) # H -> 128
-        self.hyper_encoder_2 = HyperMLP(knob_dim=knob_dim, input_dim=hidden_dim, output_dim=output_dim) # 128 -> 16
+        self.layers = nn.Sequential(
+            HyperMLP(knob_dim=knob_dim, input_dim=input_dim, output_dim=hidden_dim), # H -> 128
+            HyperMLP(knob_dim=knob_dim, input_dim=128, output_dim=output_dim), # 128 -> 16
+        )
         self.apply(self._init_weights)
+
+    def get_weights(self, notion:th.Tensor) -> th.Tensor:
+        return torch.hstack([layer.get_weights(notion) for layer in self.layers])
 
     def forward(self, notion:th.Tensor, x:th.Tensor) -> th.Tensor:
         """
@@ -107,8 +118,8 @@ class HyperEncoder(Model):
             Outputs:
                 h:th.Tensor             encoded examples in the notion's conceptual space
         """
-        x = F.relu(self.hyper_encoder_1(notion, x))
-        return self.hyper_encoder_2(notion, x)
+        for layer in self.layers: x = F.relu(layer(notion, x))
+        return x
 
 
 class HyperMem(Model):
@@ -125,10 +136,11 @@ class HyperMem(Model):
         """
         self._d = nn.Parameter(th.empty(0))
         self._d.requires_grad = False
+
         self.filter = nn.Linear(in_features=knob_dim, out_features=input_dim)
-        self.centroid = nn.Linear(in_features=knob_dim, out_features=input_dim)
         self.embedding = nn.Sequential(nn.Linear(lm_dim, lm_dim//2), nn.Linear(lm_dim//2, knob_dim))
         self.encoder = HyperEncoder(knob_dim=knob_dim, input_dim=input_dim, hidden_dim=hidden_dim, output_dim=output_dim)
+        
         self.bert_tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
         self.bert = BertModel.from_pretrained("bert-base-uncased")
         for name, param in self.bert.named_parameters(): param.requires_grad = False
@@ -148,16 +160,9 @@ class HyperMem(Model):
             e_notion = self.bert(t_notion.input_ids).last_hidden_state[:, 0]
             k = F.relu(self.embedding(e_notion)) # 1, 128
         # HyperNet
-        w_filt = self.filter(k)
-        w_enc1, bias_enc1 = self.encoder.hyper_encoder_1.get_weights(k)
-        w_enc2, bias_enc2 = self.encoder.hyper_encoder_2.get_weights(k)
-        return {
-            "filter": w_filt,
-            "encoder1": w_enc1,
-            "bias_enc1": bias_enc1,
-            "encoder2": w_enc2,
-            "bias_enc2": bias_enc2,
-        }
+        w_filt = self.filter(k).view(-1)
+        w_enc = self.encoder.get_weights(k)
+        return torch.hstack((w_filt, w_enc))
 
     def forward(self, notion:str, x:th.Tensor) -> (th.Tensor, th.Tensor):
         """
@@ -174,10 +179,9 @@ class HyperMem(Model):
             e_notion = self.bert(t_notion.input_ids).last_hidden_state[:, 0]
         e_notion = F.relu(self.embedding(e_notion)) # 1, 128
         # Encoding
-        centroid = self.centroid(e_notion)
         filter = self.filter(e_notion)
         h = x * filter # B, 512
         z = self.encoder(e_notion, h)
-        return z, centroid
+        return z
 
 
