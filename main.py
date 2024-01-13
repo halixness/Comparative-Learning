@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 
 from config import *
 from dataset import *
-from models import *
+from models.small_capable import *
 
 random.seed(1337)
 device = "cuda" if torch.cuda.is_available() else "cpu"
