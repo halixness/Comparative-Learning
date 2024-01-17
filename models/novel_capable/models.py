@@ -21,29 +21,6 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-class CLIP_AE_Encode(nn.Module):
-	def __init__(self, hidden_dim, latent_dim, isAE=False):
-		super(CLIP_AE_Encode, self).__init__()
-		# Build Encoder
-		self.fc1 = nn.Linear(512, hidden_dim)
-		self.fc2 = nn.Linear(hidden_dim, latent_dim)
-		self.relu = nn.ReLU(inplace=True)
-
-		if isAE:
-			self.filter = nn.Parameter(torch.ones((512)))
-		else:
-			self.filter = nn.Parameter(torch.rand((512)))
-
-	def forward(self, clip_model, images):
-		with torch.no_grad():
-			emb = clip_model.encode_image(images).float()
-		out = emb * self.filter
-		out = self.relu(self.fc1(out))
-		z = self.fc2(out)
-
-		return z
-     
-
 class Model(nn.Module):
     
     def forward(self):
@@ -58,18 +35,31 @@ class Model(nn.Module):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
 
+class SkipBlock(Model):
+    def __init__(self, input_dim:int, output_dim:int):
+        super(SkipBlock, self).__init__()
+        self.ff = nn.Linear(input_dim, output_dim)
+        #self.norm = nn.LayerNorm([output_dim])
+
+    def forward(self, x:th.Tensor) -> th.tensor:
+        x = x + F.gelu(self.ff(x))
+        #return self.norm(x)
+        return x
+
 class HyperMLP(Model):
     def __init__(self, knob_dim:int, input_dim:int, output_dim:int, bias:bool=True):
         super(HyperMLP, self).__init__()
         self.in_dim = input_dim
         self.out_dim = output_dim
         self.bias = bias
+        hidden_dim = (input_dim*output_dim)//32
         self.ff = nn.Sequential(
-            nn.Linear(knob_dim, output_dim),
-            nn.ReLU(),
-            nn.Linear(output_dim, input_dim*output_dim)
+            nn.Linear(knob_dim, hidden_dim),
+            SkipBlock(hidden_dim, hidden_dim),
+            SkipBlock(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, input_dim*output_dim),
         )
-        if self.bias: self.b = nn.Parameter(th.zeros((output_dim)))
+        if self.bias: self.b = nn.Linear(knob_dim, output_dim)
         self.apply(self._init_weights)
 
     def get_weights(self, k:th.Tensor) -> th.Tensor:
@@ -80,7 +70,7 @@ class HyperMLP(Model):
                 w:th.Tensor             predicted MLP weights (1, in_dim*out_dim)
         """
         w = self.ff(k).view(-1)
-        if self.bias: w = torch.hstack((w, self.b.view(-1))) 
+        if self.bias: w = torch.hstack((w, self.b(k).view(-1))) 
         return w
 
     def forward(self, k:th.Tensor, x:th.Tensor) -> th.tensor:
@@ -93,9 +83,69 @@ class HyperMLP(Model):
         """
         W = self.ff(k).view(self.out_dim, self.in_dim) # H', H
         h = (x @ th.t(W)) # B, H'
-        if self.bias: h += self.b.repeat(h.shape[0], 1)
+        if self.bias: h += self.b(k).repeat(h.shape[0], 1)
         return h
-    
+
+class HyperLayerNorm(Model):
+    def __init__(self, knob_dim:int, input_dim:int):
+        super(HyperLayerNorm, self).__init__()
+        self._d = nn.Parameter(th.empty(0))
+        self._d.requires_grad = False
+        self.input_dim = input_dim
+        self.ff_lmbda = nn.Linear(knob_dim, input_dim)
+        self.ff_beta = nn.Linear(knob_dim, input_dim)
+        self.apply(self._init_weights)
+
+    def get_weights(self, k:th.Tensor) -> th.Tensor:
+        """
+            Inputs:
+                k:th.Tensor             hypernet conditioning input of the form (B, D)
+            Outputs:
+                w:th.Tensor             predicted MLP weights (1, in_dim*out_dim)
+        """
+        w_lmbda = self.ff_lmbda(k).view(-1)
+        w_beta = self.ff_beta(k).view(-1)
+        return torch.hstack((w_lmbda, w_beta))
+
+    def forward(self, k: th.Tensor, x: th.Tensor) -> th.Tensor:
+        """
+        Inputs:
+            k: th.Tensor             hypernet conditioning input of the form (B, D)
+            x: th.Tensor             input of the form (B, H)
+        Outputs:
+            h: th.Tensor             encoded examples of the form (B, H')
+        """
+        lmbda = self.ff_lmbda(k)
+        beta = self.ff_beta(k)
+
+        mean_x = torch.mean(x, dim=0)
+        var_x = torch.var(x, dim=0) + (torch.ones(x.shape[-1]) * 1e-5).to(self._d.device)
+
+        normalized = (mean_x / torch.sqrt(var_x)).unsqueeze(0) * lmbda + beta.repeat(x.shape[0], 1)
+        return normalized
+   
+class HyperSkipBlock(Model):
+    def __init__(self, knob_dim:int, input_dim:int, output_dim:int):
+        super(HyperSkipBlock, self).__init__()
+        self.ff = HyperMLP(knob_dim=knob_dim, input_dim=input_dim, output_dim=output_dim)
+        #self.norm = HyperLayerNorm(knob_dim=knob_dim, input_dim=input_dim)
+
+    def get_weights(self, k:th.Tensor) -> th.Tensor:
+        """
+            Inputs:
+                k:th.Tensor             hypernet conditioning input of the form (B, D)
+            Outputs:
+                w:th.Tensor             predicted MLP weights (1, in_dim*out_dim)
+        """
+        w = self.ff.get_weights(k)
+        #w_norm = self.norm.get_weights(k).view(-1)
+        #return torch.hstack((w, w_norm)) 
+        return w
+
+    def forward(self, k:th.Tensor, x:th.Tensor) -> th.tensor:
+        x = x + F.gelu(self.ff(k, x))
+        #return self.norm(k, x)
+        return x
 
 class HyperEncoder(Model):
 
@@ -103,7 +153,9 @@ class HyperEncoder(Model):
         super(HyperEncoder, self).__init__()
         self.layers = nn.Sequential(
             HyperMLP(knob_dim=knob_dim, input_dim=input_dim, output_dim=hidden_dim),
-            HyperMLP(knob_dim=knob_dim, input_dim=hidden_dim, output_dim=output_dim),
+            HyperSkipBlock(knob_dim=knob_dim, input_dim=hidden_dim, output_dim=hidden_dim),
+            HyperSkipBlock(knob_dim=knob_dim, input_dim=hidden_dim, output_dim=hidden_dim),
+            HyperMLP(knob_dim=knob_dim, input_dim=hidden_dim, output_dim=latent_dim),
         )
         self.apply(self._init_weights)
 
@@ -118,7 +170,7 @@ class HyperEncoder(Model):
             Outputs:
                 h:th.Tensor             encoded examples in the notion's conceptual space
         """
-        for layer in self.layers: x = F.relu(layer(notion, x))
+        for l in self.layers: x = l(notion, x)
         return x
 
 
@@ -159,7 +211,7 @@ class HyperMem(Model):
         with th.no_grad():
             t_notion = self.bert_tokenizer(notion, return_tensors="pt").to(self._d.device)
             e_notion = self.bert(t_notion.input_ids).last_hidden_state[:, 0]
-            k = F.relu(self.embedding(e_notion)) # 1, 128
+            k = F.gelu(self.embedding(e_notion)) # 1, 128
         # HyperNet
         w_centroid = self.centroid(k).view(-1)
         w_filt = self.filter(k).view(-1)
@@ -179,7 +231,7 @@ class HyperMem(Model):
         with th.no_grad():
             t_notion = self.bert_tokenizer(notion, return_tensors="pt").to(self._d.device)
             e_notion = self.bert(t_notion.input_ids).last_hidden_state[:, 0]
-        e_notion = F.relu(self.embedding(e_notion)) # 1, 128
+        e_notion = F.gelu(self.embedding(e_notion)) # 1, 128
         # Encoding
         filter = self.filter(e_notion)
         c = self.centroid(e_notion)

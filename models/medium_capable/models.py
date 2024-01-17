@@ -65,9 +65,21 @@ class HyperMLP(Model):
         self.out_dim = output_dim
         self.bias = bias
         self.ff = nn.Sequential(
-            nn.Linear(knob_dim, output_dim),
+            nn.Linear(knob_dim, 256),
             nn.ReLU(),
-            nn.Linear(output_dim, input_dim*output_dim)
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, input_dim*output_dim)
         )
         if self.bias: self.b = nn.Parameter(th.zeros((output_dim)))
         self.apply(self._init_weights)
@@ -95,15 +107,18 @@ class HyperMLP(Model):
         h = (x @ th.t(W)) # B, H'
         if self.bias: h += self.b.repeat(h.shape[0], 1)
         return h
-    
 
 class HyperEncoder(Model):
 
     def __init__(self, knob_dim:int=128, input_dim:int=512, hidden_dim:int=128, output_dim:int=16):
         super(HyperEncoder, self).__init__()
         self.layers = nn.Sequential(
-            HyperMLP(knob_dim=knob_dim, input_dim=input_dim, output_dim=hidden_dim),
-            HyperMLP(knob_dim=knob_dim, input_dim=hidden_dim, output_dim=output_dim),
+            HyperMLP(knob_dim=knob_dim, input_dim=input_dim, output_dim=256),
+            HyperMLP(knob_dim=knob_dim, input_dim=256, output_dim=512),
+            HyperMLP(knob_dim=knob_dim, input_dim=512, output_dim=512),
+            HyperMLP(knob_dim=knob_dim, input_dim=512, output_dim=512),
+            HyperMLP(knob_dim=knob_dim, input_dim=512, output_dim=512),
+            HyperMLP(knob_dim=knob_dim, input_dim=512, output_dim=output_dim),
         )
         self.apply(self._init_weights)
 

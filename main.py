@@ -16,9 +16,13 @@ from torch.utils.data import DataLoader
 
 from config import *
 from dataset import *
-from models.small_capable import *
+from models.novel import *
+
+torch.autograd.set_detect_anomaly(True)
 
 random.seed(1337)
+torch.manual_seed(1337)
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 wandb_run = None
 
@@ -42,8 +46,10 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch):
 	loss = 10
 	ct = 0
 
-	while ct <= lesson_iterations:
+	while loss > 0.008:
 		ct += 1
+		if ct > 5:
+			break
 		progressbar = tqdm(range(200))
 		for i in progressbar:
 			# Get Inputs: sim_batch, (sim_batch, 4, 128, 128)
@@ -111,13 +117,12 @@ def compute_regularizer_loss(model:HyperMem, memory:dict) -> th.Tensor:
 		Outputs:
 			loss:th.Tensor		mean task weight loss
 	"""
-	# print(f"Computing loss for: {list(memory.keys())}")
 	task_loss = 0
 	for lesson, val in memory.items(): # for each old task
 		old_params = val["params"] # (L)
 		new_params = model.get_weights(lesson) # (L)
-		# task_loss += (old_params - new_params).pow(2).sum()
-		task_loss += F.huber_loss(new_params, old_params, reduction="sum")
+		task_loss += (old_params - new_params).pow(2).sum()
+		# task_loss += F.huber_loss(new_params, old_params, reduction="sum")
 	return torch.mean(task_loss)
 		
 
