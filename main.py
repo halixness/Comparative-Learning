@@ -27,14 +27,25 @@ torch.manual_seed(1337)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 wandb_run = None
 
+
+def get_buffer_distribution(buffer):
+	if len(buffer.data) > 0:
+		notions = {}
+		for sample in buffer.data:
+			notions.setdefault(sample["x_lesson"], 0)
+			notions[sample["x_lesson"]] += 1 / len(buffer.data)
+		return notions
+	else: return None
+
 # https://en.wikipedia.org/wiki/Reservoir_sampling#:~:text=Reservoir%20sampling%20is%20a%20family,to%20fit%20into%20main%20memory.
 class Buffer:
-	def __init__(self, alpha:float, size:int):
+	def __init__(self, alpha:float, beta:float, size:int):
 		self.data = []
 		self.numbers = []
 		self.largest_idx = None
 		self.size = size
 		self.alpha = alpha
+		self.beta = beta
 
 	def get_sample(self) -> object:
 		if len(self.data) == self.size:
@@ -82,14 +93,15 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer):
 			break
 		progressbar = tqdm(range(200))
 		for i in progressbar:
+			
 			# Get Inputs: sim_batch, (sim_batch, 4, 128, 128)
 			base_name_sim, images_sim = dt.get_better_similar(attr, lesson)
 			images_sim = images_sim.to(device)
 			with torch.no_grad():
-				emb = clip_model.encode_image(images_sim).float() # B, 512
-
+				sim_emb = clip_model.encode_image(images_sim).float() # B, 512
+				
 			# run similar model
-			z_sim, centroid_sim = model(lesson, emb)
+			z_sim, centroid_sim = model(lesson, sim_emb)
 			centroid_sim = centroid_sim.squeeze(0)
 			loss_sim = h_get_sim_loss(z_sim, centroid_sim)
 
@@ -97,10 +109,10 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer):
 			base_name_dif, images_dif = dt.get_better_similar_not(attr, lesson)
 			images_dif = images_dif.to(device)
 			with torch.no_grad():
-				emb = clip_model.encode_image(images_dif).float() # B, 512
-
+				dif_emb = clip_model.encode_image(images_dif).float() # B, 512
+				
 			# run difference model
-			z_dif, _ = model(lesson, emb)
+			z_dif, _ = model(lesson, dif_emb)
 			loss_dif = get_sim_not_loss(centroid_sim, z_dif)
 
 			# Normal loss
@@ -109,8 +121,13 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer):
 			# Dark Experience Replay
 			sample = buffer.get_sample()
 			if sample is not None:
-				x, z = sample["x"], sample["z"]
-				reg = F.mse_loss(z, model.get_weights(x))
+				# component 2
+				z_sim, centroid = model(sample["x_lesson"], sample["x_sim_emb"])
+				z_dif, _ = model(sample["x_lesson"], sample["x_dif_emb"])
+				centroid = centroid_sim.squeeze(0)
+				reg_loss_sim = h_get_sim_loss(z_sim, centroid)
+				reg_loss_dif = get_sim_not_loss(centroid, z_dif)
+				reg = (reg_loss_sim)**2 + (reg_loss_dif-1)**2
 				loss = loss + buffer.alpha * reg
 
 			# Backprop
@@ -131,13 +148,16 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer):
 			# Update reservoir
 			with torch.no_grad():
 				buffer.add_sample({
-					"x": lesson,
-					"z": model.get_weights(lesson)
+					"x_lesson": lesson,
+					"x_sim_emb": sim_emb,
+					"x_dif_emb": dif_emb,
+					# "z": model.get_weights(lesson),
 				})
 
 		print('[', ct, ']', loss.detach().item(), loss_sim.detach().item(),
 				loss_dif.detach().item())
-		
+		print(f"buffer: {get_buffer_distribution(buffer)}")
+
 	############ save model #########
 	with torch.no_grad():
 		memory[lesson] = {} # (L)
@@ -230,7 +250,7 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 
 
 def my_clip_train(in_path, out_path, model_name, source, in_base,
-				types, dic, vocab, pre_trained_model, alpha):
+				types, dic, vocab, pre_trained_model, hyperparams):
 	# Get data
 	clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
 	dt = MyDataset(in_path, source, in_base, types, dic, vocab,
@@ -241,7 +261,8 @@ def my_clip_train(in_path, out_path, model_name, source, in_base,
 	print(f"[-] #params: {count_parameters(model)}")
 
 	# Define a buffer
-	buffer = Buffer(alpha=alpha, size=5)
+	alpha, beta = hyperparams
+	buffer = Buffer(alpha=alpha, beta=beta, size=200)
 
 	best_nt = 0
 	t_tot = 0
@@ -290,7 +311,9 @@ if __name__ == "__main__":
 				help='Iterations per concept')
 	argparser.add_argument('--buffer_size', '-bf', default=200, type=int,
 				help='Replay buffer size')
-	argparser.add_argument('--alpha', '-a', default=0.1, type=int,
+	argparser.add_argument('--alpha', '-a', default=0.5, type=int,
+				help='Regularization hyperparam alpha')
+	argparser.add_argument('--beta', '-b', default=0.5, type=int,
 				help='Regularization hyperparam alpha')
 	args = argparser.parse_args()
 
@@ -304,11 +327,12 @@ if __name__ == "__main__":
 			"batch_size": batch_size,
 			"latent_dim": latent_dim,
 			"alpha": args.alpha,
+			"beta": args.beta,
 			"buffer_size": args.buffer_size
 		}
 		wandb_run = wandb.init(name=args.run_name, project="hypernet-concept-learning", config=config)
 		
 	my_clip_train(args.in_path, args.out_path, args.model_name,
-				'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, args.alpha)
+				'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, (args.alpha, args.beta))
 
 	
