@@ -4,6 +4,7 @@ import clip
 import time
 import pickle
 import random
+import numpy as np
 import argparse
 import torch.nn as nn
 import torch.optim as optim
@@ -26,7 +27,36 @@ torch.manual_seed(1337)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 wandb_run = None
 
-def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch):
+# https://en.wikipedia.org/wiki/Reservoir_sampling#:~:text=Reservoir%20sampling%20is%20a%20family,to%20fit%20into%20main%20memory.
+class Buffer:
+	def __init__(self, alpha:float, size:int):
+		self.data = []
+		self.numbers = []
+		self.largest_idx = None
+		self.size = size
+		self.alpha = alpha
+
+	def get_sample(self) -> object:
+		if len(self.data) == self.size:
+			idx = int(random.uniform(0, self.size-1))
+			return self.data[idx]
+		else: return None
+		
+	def add_sample(self, x:object) -> None:
+		""" Add new object with reservoir strategy """
+		random_no = random.uniform(0, 1)
+		if len(self.data) < self.size: 
+			self.data.append(x)
+			self.numbers.append(random_no)
+			if self.largest_idx is None or random_no > self.numbers[self.largest_idx]:
+				self.largest_idx = len(self.data) - 1
+		elif random_no < self.numbers[self.largest_idx]:
+			self.data[self.largest_idx] = x
+			self.numbers[self.largest_idx] = random_no
+			self.largest_idx = np.argmax(self.numbers)
+
+
+def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer):
 
 	# get model
 	clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
@@ -48,7 +78,7 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch):
 
 	while loss > 0.008:
 		ct += 1
-		if ct > 5:
+		if ct > args.lesson_iterations:
 			break
 		progressbar = tqdm(range(200))
 		for i in progressbar:
@@ -73,12 +103,21 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch):
 			z_dif, _ = model(lesson, emb)
 			loss_dif = get_sim_not_loss(centroid_sim, z_dif)
 
-			# compute loss
-			# loss_sim in [0, 0.15]
-			# loss_dif in [0.5, 1.5]
-			# loss_reg in [0.005, 0.015] => [0.05, 0.15]
+			# Normal loss
 			loss = (loss_sim)**2 + (loss_dif-1)**2
 
+			# Dark Experience Replay
+			sample = buffer.get_sample()
+			if sample is not None:
+				x, z = sample["x"], sample["z"]
+				reg = F.mse_loss(z, model.get_weights(x))
+				loss = loss + buffer.alpha * reg
+
+			# Backprop
+			optimizer.zero_grad()
+			loss.backward()
+			optimizer.step()
+			# Log
 			log = {
 				"train/loss": loss.detach().item(),
 				"train/loss_sim": loss_sim.detach().item(),
@@ -86,45 +125,24 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch):
 				"epoch": epoch,
 				"centroid": torch.mean(centroid_sim)
 			}
-
-			if len(memory.keys()) > 0:  # hyper-output regularization
-				regularizer_loss = compute_regularizer_loss(model, memory)
-				loss += beta_reg * regularizer_loss
-				log["train/regularizer_loss"] = beta_reg * regularizer_loss.detach().item()
-				log["train/loss"] = loss.detach().item()
-
 			progressbar.set_description(f"loss: {loss.item():.2f}")
-			optimizer.zero_grad()
-			loss.backward()
-			optimizer.step()
 			if wandb_run: wandb_run.log(log)
 			else: print(log)
+			# Update reservoir
+			with torch.no_grad():
+				buffer.add_sample({
+					"x": lesson,
+					"z": model.get_weights(lesson)
+				})
 
 		print('[', ct, ']', loss.detach().item(), loss_sim.detach().item(),
 				loss_dif.detach().item())
 		
 	############ save model #########
 	with torch.no_grad():
-		memory[lesson] = {"params": model.get_weights(lesson)} # (L)
+		memory[lesson] = {} # (L)
 	return model, memory
 
-def compute_regularizer_loss(model:HyperMem, memory:dict) -> th.Tensor:
-	"""
-		Wrt. previous task memory of weights, enforce them to the given hypermodel
-		Inputs:
-			model:HyperMem		a hypernetwork memory
-			memory:dict			a dictionary of the form {lesson1: {params:[], ...}, ...}
-		Outputs:
-			loss:th.Tensor		mean task weight loss
-	"""
-	task_loss = 0
-	for lesson, val in memory.items(): # for each old task
-		old_params = val["params"] # (L)
-		new_params = model.get_weights(lesson) # (L)
-		task_loss += (old_params - new_params).pow(2).sum()
-		# task_loss += F.huber_loss(new_params, old_params, reduction="sum")
-	return torch.mean(task_loss)
-		
 
 def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memory, epoch):
 	with torch.no_grad():
@@ -212,27 +230,32 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 
 
 def my_clip_train(in_path, out_path, model_name, source, in_base,
-				types, dic, vocab, pre_trained_model=None):
-	# get data
+				types, dic, vocab, pre_trained_model, alpha):
+	# Get data
 	clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
 	dt = MyDataset(in_path, source, in_base, types, dic, vocab,
 					clip_preprocessor=clip_preprocess)
 
-	# load encoder models from memory
+	# Load encoder models from memory
 	model = HyperMem(lm_dim=768, knob_dim=128, input_dim=512, hidden_dim=128, output_dim=latent_dim).to(device)
 	print(f"[-] #params: {count_parameters(model)}")
+
+	# Define a buffer
+	buffer = Buffer(alpha=alpha, size=5)
 
 	best_nt = 0
 	t_tot = 0
 	memory = {}
+
 	for i in range(epochs):
 		for tl in types_learning:  # attr
 			random.shuffle(dic[tl])
 			for vi in dic[tl]:  # lesson
+
 				# Train
 				print("#################### Learning: " + str(i) + " ----- " + str(vi))
 				t_start = time.time()
-				model, memory = my_train_clip_encoder(dt, model, tl, vi, memory, i)
+				model, memory = my_train_clip_encoder(dt, model, tl, vi, memory, i, buffer)
 				t_end = time.time()
 				t_dur = t_end - t_start
 				t_tot += t_dur
@@ -244,11 +267,10 @@ def my_clip_train(in_path, out_path, model_name, source, in_base,
 				if top_nt > best_nt:
 					best_nt = top_nt
 					print("++++++++++++++ BEST NT: " + str(best_nt))
-					# with open(os.path.join(out_path, model_name), 'wb') as handle:
-					#	pickle.dump(memory, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 if __name__ == "__main__":
+
 	argparser = argparse.ArgumentParser()
 	argparser.add_argument('--in_path', '-i',
 				help='Data input path', required=True)
@@ -266,9 +288,11 @@ if __name__ == "__main__":
 				help='Device')
 	argparser.add_argument('--lesson_iterations', '-ct', default=4, type=int,
 				help='Iterations per concept')
+	argparser.add_argument('--buffer_size', '-bf', default=200, type=int,
+				help='Replay buffer size')
+	argparser.add_argument('--alpha', '-a', default=0.1, type=int,
+				help='Regularization hyperparam alpha')
 	args = argparser.parse_args()
-	
-	lesson_iterations = args.lesson_iterations
 
 	if args.wandb:
 		wandb.login()
@@ -279,11 +303,12 @@ if __name__ == "__main__":
 			"epochs": epochs,
 			"batch_size": batch_size,
 			"latent_dim": latent_dim,
-			"beta_reg": beta_reg
+			"alpha": args.alpha,
+			"buffer_size": args.buffer_size
 		}
 		wandb_run = wandb.init(name=args.run_name, project="hypernet-concept-learning", config=config)
 		
 	my_clip_train(args.in_path, args.out_path, args.model_name,
-				'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train)
+				'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, args.alpha)
 
 	

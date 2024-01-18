@@ -93,7 +93,6 @@ bsn_test_2_old = "bsn_test_2_old.txt"
 resize = 224
 lr = 5e-5
 epochs = 5
-beta_reg = 0.1
 lesson_iterations = 4
 
 sim_batch = 128
