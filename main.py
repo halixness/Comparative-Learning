@@ -106,19 +106,11 @@ def get_buffer_distribution(buffer):
 		return notions
 	else: return None
 
-def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer, rank):
+def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer, rank, ngpus):
 
 	# get model
 	clip_model, clip_preprocess = clip.load("ViT-B/32", device=rank)
-	
-	optimizer = optim.Adam([
-		{'params': model.filter.parameters()},
-		{'params': model.centroid.parameters()},
-		{'params': model.embedding.parameters()},
-		{'params': model.encoder.parameters(), 'lr': 1e-4}
-	], lr=1e-3)
-	# optimizer = optim.Adam(model.parameters(), lr=1e-4)
-
+	optimizer = optim.Adam(model.parameters(), lr=1e-4)
 	model.train()
 
 	loss_sim = None
@@ -128,7 +120,7 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer, rank):
 
 	while loss > 0.008:
 		ct += 1
-		if ct >= args.lesson_iterations:
+		if ct >= 4:
 			break
 		progressbar = tqdm(range(200 // ngpus))
 		for i in progressbar:
@@ -318,7 +310,7 @@ def my_clip_train(rank, in_path, out_path, model_name, source, in_base,
 	
 	# Define a buffer
 	alpha, beta, buffer_size = hyperparams
-	buffer = Buffer(alpha=alpha, beta=beta, size=buffer_size * ngpus)
+	buffer = Buffer(alpha=alpha, beta=beta, size=buffer_size)
 
 	best_nt = 0
 	t_tot = 0
@@ -332,19 +324,19 @@ def my_clip_train(rank, in_path, out_path, model_name, source, in_base,
 				
 				# Training
 				t_start = time.time()
-				model, memory = my_train_clip_encoder(dt, model, tl, vi, memory, i, buffer, rank)
+				model, memory = my_train_clip_encoder(dt, model, tl, vi, memory, i, buffer, rank, ngpus)
 				t_end = time.time()
 				t_dur = t_end - t_start
 				t_tot += t_dur
 				print("Time: ", t_dur, t_tot)
 
 				# Evaluate
-				if args.parallel and rank == 0:
+				if (is_parallel == False) or (is_parallel and rank == 0):
 					top_nt = my_clip_evaluation(in_path, 'novel_test/', model, bsn_novel_test_1, ['rgba'], dic_train, vocab, memory, i, rank)
 					if top_nt > best_nt:
 						best_nt = top_nt
 						print("++++++++++++++ BEST NT: " + str(best_nt))
-				if args.parallel: torch.distributed.barrier()
+				if is_parallel: torch.distributed.barrier()
 	
 	if is_parallel: destroy_process_group()
 
@@ -382,7 +374,6 @@ if __name__ == "__main__":
 	if args.wandb:
 		wandb.login()
 		config = {
-			"lr": lr,
 			"sim_batch": sim_batch,
 			"gen_batch": gen_batch,
 			"epochs": epochs,
