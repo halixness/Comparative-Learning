@@ -48,8 +48,8 @@ class Buffer:
 		self.beta = beta
 
 	def get_sample(self) -> object:
-		if len(self.data) == self.size:
-			idx = int(random.uniform(0, self.size-1))
+		if len(self.data) > 1:
+			idx = int(random.uniform(0, len(self.data)-1))
 			return self.data[idx]
 		else: return None
 		
@@ -76,7 +76,7 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer):
 	optimizer = optim.Adam([
 		# model.filter
 		# model.embedding
-		{'params': model.encoder.parameters(), 'lr': 1e-4}
+		{'params': model.encoder.parameters(), 'lr': lr}
 	], lr=1e-3)
 	# optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
@@ -89,16 +89,18 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer):
 
 	while loss > 0.008:
 		ct += 1
-		if ct > args.lesson_iterations:
+		if ct >= args.lesson_iterations:
 			break
 		progressbar = tqdm(range(200))
 		for i in progressbar:
+
+			optimizer.zero_grad()
 			
 			# Get Inputs: sim_batch, (sim_batch, 4, 128, 128)
 			base_name_sim, images_sim = dt.get_better_similar(attr, lesson)
 			images_sim = images_sim.to(device)
 			with torch.no_grad():
-				sim_emb = clip_model.encode_image(images_sim).float() # B, 512
+				sim_emb = clip_model.encode_image(images_sim).float().detach() # B, 512
 				
 			# run similar model
 			z_sim, centroid_sim = model(lesson, sim_emb)
@@ -109,32 +111,35 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer):
 			base_name_dif, images_dif = dt.get_better_similar_not(attr, lesson)
 			images_dif = images_dif.to(device)
 			with torch.no_grad():
-				dif_emb = clip_model.encode_image(images_dif).float() # B, 512
+				dif_emb = clip_model.encode_image(images_dif).float().detach() # B, 512
 				
 			# run difference model
 			z_dif, _ = model(lesson, dif_emb)
 			loss_dif = get_sim_not_loss(centroid_sim, z_dif)
 
-			# Normal loss
+			# Dark Experience Replay (++)
+			sample1 = buffer.get_sample()
+			sample2 = buffer.get_sample()
+			reg = None
+			if sample1 and sample2:
+				# Component 1: matching the logits
+				n1_z_sim, _ = model(sample1["x_lesson"], sample1["x_sim_emb"])
+				n1_z_dif, _ = model(sample1["x_lesson"], sample1["x_dif_emb"])
+				reg_loss1 = buffer.alpha * (F.mse_loss(n1_z_sim, sample1["z_sim"]) + F.mse_loss(n1_z_dif, sample1["z_dif"]))
+				# Component 2: matching the labels (but it's unsupervised)
+				n2_z_sim, n2_centroid = model(sample1["x_lesson"], sample1["x_sim_emb"])
+				n2_z_dif, _ = model(sample1["x_lesson"], sample1["x_dif_emb"])
+				n2_centroid = n2_centroid.squeeze(0)
+				reg_loss_sim = h_get_sim_loss(n2_z_sim, n2_centroid)
+				reg_loss_dif = get_sim_not_loss(n2_centroid, n2_z_dif)
+				reg_loss2 = buffer.beta * ((reg_loss_sim)**2 + (reg_loss_dif-1)**2)
+				# DER++
+				reg =  reg_loss1 + reg_loss2
+
+			# Loss
 			loss = (loss_sim)**2 + (loss_dif-1)**2
+			if reg: loss = loss + reg
 
-			# Dark Experience Replay
-			sample = buffer.get_sample()
-			if sample is not None:
-				# component 2
-				z_sim, centroid = model(sample["x_lesson"], sample["x_sim_emb"])
-				z_dif, _ = model(sample["x_lesson"], sample["x_dif_emb"])
-				centroid = centroid_sim.squeeze(0)
-				reg_loss_sim = h_get_sim_loss(z_sim, centroid)
-				reg_loss_dif = get_sim_not_loss(centroid, z_dif)
-				reg = (reg_loss_sim)**2 + (reg_loss_dif-1)**2
-				loss = loss + buffer.alpha * reg
-
-			# Backprop
-			optimizer.zero_grad()
-			loss.backward()
-			optimizer.step()
-			# Log
 			log = {
 				"train/loss": loss.detach().item(),
 				"train/loss_sim": loss_sim.detach().item(),
@@ -142,16 +147,24 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer):
 				"epoch": epoch,
 				"centroid": torch.mean(centroid_sim)
 			}
+			if reg is not None: log["train/regularizer"] = reg
+
+			# Backprop
+			loss.backward()
+			optimizer.step()
+			# Log
 			progressbar.set_description(f"loss: {loss.item():.2f}")
 			if wandb_run: wandb_run.log(log)
 			else: print(log)
+			
 			# Update reservoir
 			with torch.no_grad():
 				buffer.add_sample({
 					"x_lesson": lesson,
-					"x_sim_emb": sim_emb,
-					"x_dif_emb": dif_emb,
-					# "z": model.get_weights(lesson),
+					"x_sim_emb": sim_emb.detach(),
+					"x_dif_emb": dif_emb.detach(),
+					"z_sim": z_sim.detach(),
+					"z_dif": z_dif.detach(),
 				})
 
 		print('[', ct, ']', loss.detach().item(), loss_sim.detach().item(),
@@ -261,8 +274,8 @@ def my_clip_train(in_path, out_path, model_name, source, in_base,
 	print(f"[-] #params: {count_parameters(model)}")
 
 	# Define a buffer
-	alpha, beta = hyperparams
-	buffer = Buffer(alpha=alpha, beta=beta, size=200)
+	alpha, beta, buffer_size = hyperparams
+	buffer = Buffer(alpha=alpha, beta=beta, size=buffer_size)
 
 	best_nt = 0
 	t_tot = 0
@@ -333,6 +346,6 @@ if __name__ == "__main__":
 		wandb_run = wandb.init(name=args.run_name, project="hypernet-concept-learning", config=config)
 		
 	my_clip_train(args.in_path, args.out_path, args.model_name,
-				'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, (args.alpha, args.beta))
+				'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, (args.alpha, args.beta, args.buffer_size))
 
 	

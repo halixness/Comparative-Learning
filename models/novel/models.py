@@ -36,18 +36,13 @@ class Model(nn.Module):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
 
-
 class HyperMLP(Model):
     def __init__(self, knob_dim:int, input_dim:int, output_dim:int, bias:bool=True):
         super(HyperMLP, self).__init__()
         self.in_dim = input_dim
         self.out_dim = output_dim
         self.bias = bias
-        hidden_dim = (input_dim*output_dim) // 32
-        self.ff = nn.Sequential(
-            nn.Linear(knob_dim, hidden_dim),
-            nn.Linear(hidden_dim, input_dim*output_dim)
-        )
+        self.ff = nn.Linear(knob_dim, input_dim*output_dim)
         if self.bias: self.b = nn.Linear(knob_dim, output_dim)
         self.apply(self._init_weights)
 
@@ -70,19 +65,18 @@ class HyperMLP(Model):
             Outputs:
                 h:th.Tensor             encoded examples of the form (B, H')
         """
-        W = self.ff(k).view(self.out_dim, self.in_dim) # H', H
-        h = (x @ th.t(W)) # B, H'
-        if self.bias: h += self.b(k).repeat(h.shape[0], 1) # (B, H')
+        k = k.view(-1)
+        w = self.ff(k).view(self.out_dim, self.in_dim)
+        b = self.b(k).view(-1)
+        h = F.linear(x, weight=w, bias=b)
         return h
 
 class HyperEncoder(Model):
 
     def __init__(self, knob_dim:int=128, input_dim:int=512, hidden_dim:int=128, output_dim:int=16):
         super(HyperEncoder, self).__init__()
-        self.layers = nn.Sequential(
-            HyperMLP(knob_dim=knob_dim, input_dim=input_dim, output_dim=hidden_dim),
-            HyperMLP(knob_dim=knob_dim, input_dim=hidden_dim, output_dim=latent_dim),
-        )
+        self.down_mlp = HyperMLP(knob_dim=knob_dim, input_dim=input_dim, output_dim=hidden_dim)
+        self.up_mlp = HyperMLP(knob_dim=knob_dim, input_dim=hidden_dim, output_dim=latent_dim)
         self.apply(self._init_weights)
 
     def get_weights(self, notion:th.Tensor) -> th.Tensor:
@@ -96,9 +90,8 @@ class HyperEncoder(Model):
             Outputs:
                 h:th.Tensor             encoded examples in the notion's conceptual space
         """
-        for l in self.layers[:-1]: x = F.relu(l(notion, x))
-        return self.layers[-1](notion, x)
-
+        x = F.gelu(self.down_mlp(notion, x))
+        return self.up_mlp(notion, x)
 
 class HyperMem(Model):
     
@@ -115,9 +108,9 @@ class HyperMem(Model):
         self._d = nn.Parameter(th.empty(0))
         self._d.requires_grad = False
 
-        self.filter = nn.Sequential(nn.Linear(in_features=knob_dim, out_features=input_dim), nn.ReLU())
-        self.centroid = nn.Sequential(nn.Linear(in_features=knob_dim, out_features=latent_dim), nn.ReLU())
-        self.embedding = nn.Sequential(nn.Linear(lm_dim, lm_dim//2), nn.Linear(lm_dim//2, knob_dim), nn.ReLU())
+        self.filter = nn.Linear(in_features=knob_dim, out_features=input_dim) # from baseline
+        self.centroid = nn.Linear(in_features=knob_dim, out_features=latent_dim) # from baseline
+        self.embedding = nn.Sequential(nn.Linear(lm_dim, lm_dim), nn.Linear(lm_dim, knob_dim), nn.ReLU()) # from paper
         self.encoder = HyperEncoder(knob_dim=knob_dim, input_dim=input_dim, hidden_dim=hidden_dim, output_dim=output_dim)
         
         self.bert_tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
@@ -156,8 +149,8 @@ class HyperMem(Model):
         # Notion embedding
         with th.no_grad():
             t_notion = self.bert_tokenizer(notion, return_tensors="pt").to(self._d.device)
-            e_notion = self.bert(t_notion.input_ids).last_hidden_state[:, 0]
-        e_notion = F.gelu(self.embedding(e_notion)) # 1, 128
+            e_notion = self.bert(t_notion.input_ids).last_hidden_state[:, 0].detach()
+        e_notion = self.embedding(e_notion) # 1, 128
         # Encoding
         f = self.filter(e_notion)
         c = self.centroid(e_notion)

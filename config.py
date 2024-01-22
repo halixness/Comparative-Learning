@@ -91,7 +91,7 @@ bsn_test_2_old = "bsn_test_2_old.txt"
 
 # train parameters
 resize = 224
-lr = 5e-5
+lr = 1e-4
 epochs = 5
 lesson_iterations = 4
 
