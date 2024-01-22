@@ -7,35 +7,35 @@ import random
 import numpy as np
 import argparse
 import torch.nn as nn
+from typing import List
+import torch.utils.data as data
 import torch.optim as optim
 from PIL import Image
 from tqdm import tqdm
 import wandb
 import torch.nn.functional as F
-
 from torch.utils.data import DataLoader
+import torch.multiprocessing as mp
+from torch.distributed import init_process_group, destroy_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch
 
 from config import *
 from dataset import *
 from models.novel import *
 
 torch.autograd.set_detect_anomaly(True)
-
 random.seed(1337)
 torch.manual_seed(1337)
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
 wandb_run = None
 
+def ddp_setup(rank, world_size:int, port:int):
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(port)
+    init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
-def get_buffer_distribution(buffer):
-	if len(buffer.data) > 0:
-		notions = {}
-		for sample in buffer.data:
-			notions.setdefault(sample["x_lesson"], 0)
-			notions[sample["x_lesson"]] += 1 / len(buffer.data)
-		return notions
-	else: return None
+# =================================================
 
 # https://en.wikipedia.org/wiki/Reservoir_sampling#:~:text=Reservoir%20sampling%20is%20a%20family,to%20fit%20into%20main%20memory.
 class Buffer:
@@ -66,17 +66,56 @@ class Buffer:
 			self.numbers[self.largest_idx] = random_no
 			self.largest_idx = np.argmax(self.numbers)
 
+class TorchDataset(data.Dataset):
 
-def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer):
+    def __init__(self, samples:List[dict]):        
+        """
+            samples:List[object]    {predicate, subject, fact, belief}
+        """
+        self.samples = samples
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx:int) -> dict:
+        return self.samples[idx]
+
+def get_torch_dataset(dt, types_learning, dic, samples_per_lesson=200):
+	samples = []
+	tot_iters = sum([len(dic[tl]) for tl in types_learning]) * samples_per_lesson
+	progressbar = tqdm(range(tot_iters))
+	for tl in types_learning:  # attr
+		random.shuffle(dic[tl])
+		for vi in dic[tl]:  # lesson
+			for itx in range(samples_per_lesson):
+				samples.append({
+					"attr": tl,
+					"lesson": vi,
+				})
+				progressbar.update(1)
+	return TorchDataset(samples)
+
+# =================================================
+
+def get_buffer_distribution(buffer):
+	if len(buffer.data) > 0:
+		notions = {}
+		for sample in buffer.data:
+			notions.setdefault(sample["x_lesson"], 0)
+			notions[sample["x_lesson"]] += 1 / len(buffer.data)
+		return notions
+	else: return None
+
+def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer, rank):
 
 	# get model
-	clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
+	clip_model, clip_preprocess = clip.load("ViT-B/32", device=rank)
 	
-	# It is more stable
 	optimizer = optim.Adam([
-		# model.filter
-		# model.embedding
-		{'params': model.encoder.parameters(), 'lr': lr}
+		{'params': model.filter.parameters()},
+		{'params': model.centroid.parameters()},
+		{'params': model.embedding.parameters()},
+		{'params': model.encoder.parameters(), 'lr': 1e-4}
 	], lr=1e-3)
 	# optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
@@ -91,14 +130,14 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer):
 		ct += 1
 		if ct >= args.lesson_iterations:
 			break
-		progressbar = tqdm(range(200))
+		progressbar = tqdm(range(200 // ngpus))
 		for i in progressbar:
 
 			optimizer.zero_grad()
 			
 			# Get Inputs: sim_batch, (sim_batch, 4, 128, 128)
 			base_name_sim, images_sim = dt.get_better_similar(attr, lesson)
-			images_sim = images_sim.to(device)
+			images_sim = images_sim.to(rank)
 			with torch.no_grad():
 				sim_emb = clip_model.encode_image(images_sim).float().detach() # B, 512
 				
@@ -109,7 +148,7 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer):
 
 			# Run Difference
 			base_name_dif, images_dif = dt.get_better_similar_not(attr, lesson)
-			images_dif = images_dif.to(device)
+			images_dif = images_dif.to(rank)
 			with torch.no_grad():
 				dif_emb = clip_model.encode_image(images_dif).float().detach() # B, 512
 				
@@ -176,8 +215,7 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer):
 		memory[lesson] = {} # (L)
 	return model, memory
 
-
-def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memory, epoch):
+def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memory, epoch, rank):
 	with torch.no_grad():
 		# get vocab dictionary
 		if source == 'train':
@@ -186,7 +224,7 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 			dic = dic_train
 
 		# get dataset
-		clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
+		clip_model, clip_preprocess = clip.load("ViT-B/32", device=rank)
 		dt = MyDataset(in_path, source, in_base, types, dic, vocab,
 					clip_preprocessor=clip_preprocess)
 		data_loader = DataLoader(dt, batch_size=128, shuffle=True)
@@ -201,7 +239,7 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 
 		for base_is, images in data_loader:
 			# Prepare the inputs
-			images = images.to(device)
+			images = images.to(rank)
 			ans = []
 			batch_size_i = len(base_is)
 
@@ -261,47 +299,54 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 				top3_shape/tot_num, top3/tot_num)
 	return top3/tot_num
 
+def my_clip_train(rank, in_path, out_path, model_name, source, in_base,
+				types, dic, vocab, pre_trained_model, hyperparams, ngpus, port:int=12355):
 
-def my_clip_train(in_path, out_path, model_name, source, in_base,
-				types, dic, vocab, pre_trained_model, hyperparams):
+	is_parallel = ngpus > 1
+	if is_parallel: ddp_setup(rank, world_size=ngpus, port=port)
+
 	# Get data
-	clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
+	clip_model, clip_preprocess = clip.load("ViT-B/32", device=rank)
 	dt = MyDataset(in_path, source, in_base, types, dic, vocab,
 					clip_preprocessor=clip_preprocess)
 
 	# Load encoder models from memory
-	model = HyperMem(lm_dim=768, knob_dim=128, input_dim=512, hidden_dim=128, output_dim=latent_dim).to(device)
+	model = HyperMem(lm_dim=768, knob_dim=128, input_dim=512, hidden_dim=128, output_dim=latent_dim).to(rank)
 	print(f"[-] #params: {count_parameters(model)}")
-
+	
+	if is_parallel: model = DDP(model, device_ids=[rank])
+	
 	# Define a buffer
 	alpha, beta, buffer_size = hyperparams
-	buffer = Buffer(alpha=alpha, beta=beta, size=buffer_size)
+	buffer = Buffer(alpha=alpha, beta=beta, size=buffer_size * ngpus)
 
 	best_nt = 0
 	t_tot = 0
 	memory = {}
-
+	
 	for i in range(epochs):
-		for tl in types_learning:  # attr
+		for tl in types_learning:
 			random.shuffle(dic[tl])
-			for vi in dic[tl]:  # lesson
-
-				# Train
+			for vi in dic[tl]:
 				print("#################### Learning: " + str(i) + " ----- " + str(vi))
+				
+				# Training
 				t_start = time.time()
-				model, memory = my_train_clip_encoder(dt, model, tl, vi, memory, i, buffer)
+				model, memory = my_train_clip_encoder(dt, model, tl, vi, memory, i, buffer, rank)
 				t_end = time.time()
 				t_dur = t_end - t_start
 				t_tot += t_dur
 				print("Time: ", t_dur, t_tot)
 
 				# Evaluate
-				top_nt = my_clip_evaluation(in_path, 'novel_test/', model,
-								bsn_novel_test_1, ['rgba'], dic_train, vocab, memory, i)
-				if top_nt > best_nt:
-					best_nt = top_nt
-					print("++++++++++++++ BEST NT: " + str(best_nt))
-
+				if args.parallel and rank == 0:
+					top_nt = my_clip_evaluation(in_path, 'novel_test/', model, bsn_novel_test_1, ['rgba'], dic_train, vocab, memory, i, rank)
+					if top_nt > best_nt:
+						best_nt = top_nt
+						print("++++++++++++++ BEST NT: " + str(best_nt))
+				if args.parallel: torch.distributed.barrier()
+	
+	if is_parallel: destroy_process_group()
 
 if __name__ == "__main__":
 
@@ -328,6 +373,10 @@ if __name__ == "__main__":
 				help='Regularization hyperparam alpha')
 	argparser.add_argument('--beta', '-b', default=0.5, type=int,
 				help='Regularization hyperparam alpha')
+	argparser.add_argument('--parallel', '-pp', default=False, type=bool,
+				help='Enable multi-gpu computing')
+	argparser.add_argument('--port', '-po', default=12355, type=int,
+				help='Multiprocessing port network')
 	args = argparser.parse_args()
 
 	if args.wandb:
@@ -345,7 +394,14 @@ if __name__ == "__main__":
 		}
 		wandb_run = wandb.init(name=args.run_name, project="hypernet-concept-learning", config=config)
 		
-	my_clip_train(args.in_path, args.out_path, args.model_name,
-				'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, (args.alpha, args.beta, args.buffer_size))
+	port = args.port
 
+	if not args.parallel:
+		ngpus = 1
+		my_clip_train(0, args.in_path, args.out_path, args.model_name, 'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, (args.alpha, args.beta, args.buffer_size), ngpus, port)
+	else:
+		ngpus = torch.cuda.device_count()
+		mp.spawn(my_clip_train, args=(args.in_path, args.out_path, args.model_name, 'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, (args.alpha, args.beta, args.buffer_size), ngpus, port), nprocs=ngpus)
+
+	
 	
