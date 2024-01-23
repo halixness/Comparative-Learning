@@ -106,7 +106,9 @@ def get_buffer_distribution(buffer):
 		return notions
 	else: return None
 
-def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer, rank, ngpus):
+def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer, rank, ngpus, wandb_run):
+
+	is_parallel = ngpus > 1
 
 	# get model
 	clip_model, clip_preprocess = clip.load("ViT-B/32", device=rank)
@@ -202,6 +204,8 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer, rank, 
 				loss_dif.detach().item())
 		print(f"buffer: {get_buffer_distribution(buffer)}")
 
+	if is_parallel: torch.distributed.barrier()
+
 	############ save model #########
 	with torch.no_grad():
 		memory[lesson] = {} # (L)
@@ -292,7 +296,7 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 	return top3/tot_num
 
 def my_clip_train(rank, in_path, out_path, model_name, source, in_base,
-				types, dic, vocab, pre_trained_model, hyperparams, ngpus, port:int=12355):
+				types, dic, vocab, pre_trained_model, hyperparams, ngpus, port, wandb_run):
 
 	is_parallel = ngpus > 1
 	if is_parallel: ddp_setup(rank, world_size=ngpus, port=port)
@@ -324,7 +328,7 @@ def my_clip_train(rank, in_path, out_path, model_name, source, in_base,
 				
 				# Training
 				t_start = time.time()
-				model, memory = my_train_clip_encoder(dt, model, tl, vi, memory, i, buffer, rank, ngpus)
+				model, memory = my_train_clip_encoder(dt, model, tl, vi, memory, i, buffer, rank, ngpus, wandb_run)
 				t_end = time.time()
 				t_dur = t_end - t_start
 				t_tot += t_dur
@@ -389,10 +393,10 @@ if __name__ == "__main__":
 
 	if not args.parallel:
 		ngpus = 1
-		my_clip_train(0, args.in_path, args.out_path, args.model_name, 'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, (args.alpha, args.beta, args.buffer_size), ngpus, port)
+		my_clip_train(0, args.in_path, args.out_path, args.model_name, 'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, (args.alpha, args.beta, args.buffer_size), ngpus, port, wandb_run)
 	else:
 		ngpus = torch.cuda.device_count()
-		mp.spawn(my_clip_train, args=(args.in_path, args.out_path, args.model_name, 'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, (args.alpha, args.beta, args.buffer_size), ngpus, port), nprocs=ngpus)
+		mp.spawn(my_clip_train, args=(args.in_path, args.out_path, args.model_name, 'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, (args.alpha, args.beta, args.buffer_size), ngpus, port, wandb_run), nprocs=ngpus)
 
 	
 	
