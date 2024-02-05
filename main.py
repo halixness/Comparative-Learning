@@ -106,9 +106,10 @@ def get_buffer_distribution(buffer):
 		return notions
 	else: return None
 
-def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer, rank, ngpus, wandb_run):
+def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer, rank, ngpus, ntasks, wandb_run):
 
-	is_parallel = ngpus > 1
+	is_parallel = ntasks > 1
+	if ngpus == 1: rank = 0
 
 	# get model
 	clip_model, clip_preprocess = clip.load("ViT-B/32", device=rank)
@@ -296,10 +297,11 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 	return top3/tot_num
 
 def my_clip_train(rank, in_path, out_path, model_name, source, in_base,
-				types, dic, vocab, pre_trained_model, hyperparams, ngpus, port, wandb_run):
+				types, dic, vocab, pre_trained_model, hyperparams, ngpus, ntasks, port, wandb_run):
 
-	is_parallel = ngpus > 1
-	if is_parallel: ddp_setup(rank, world_size=ngpus, port=port)
+	is_parallel = ntasks > 1
+	if ngpus == 1: rank = 0 # fix to one gpu if multi processes on one
+	if is_parallel: ddp_setup(rank, world_size=ntasks, port=port)
 
 	# Get data
 	clip_model, clip_preprocess = clip.load("ViT-B/32", device=rank)
@@ -328,7 +330,7 @@ def my_clip_train(rank, in_path, out_path, model_name, source, in_base,
 				
 				# Training
 				t_start = time.time()
-				model, memory = my_train_clip_encoder(dt, model, tl, vi, memory, i, buffer, rank, ngpus, wandb_run)
+				model, memory = my_train_clip_encoder(dt, model, tl, vi, memory, i, buffer, rank, ngpus, ntasks, wandb_run)
 				t_end = time.time()
 				t_dur = t_end - t_start
 				t_tot += t_dur
@@ -373,6 +375,8 @@ if __name__ == "__main__":
 				help='Enable multi-gpu computing')
 	argparser.add_argument('--port', '-po', default=12355, type=int,
 				help='Multiprocessing port network')
+	argparser.add_argument('--tasks', '-ts', default=1, type=int,
+				help='Number of parallel tasks')
 	args = argparser.parse_args()
 
 	if args.wandb:
@@ -393,10 +397,12 @@ if __name__ == "__main__":
 
 	if not args.parallel:
 		ngpus = 1
-		my_clip_train(0, args.in_path, args.out_path, args.model_name, 'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, (args.alpha, args.beta, args.buffer_size), ngpus, port, wandb_run)
+		ntasks = 1
+		my_clip_train(0, args.in_path, args.out_path, args.model_name, 'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, (args.alpha, args.beta, args.buffer_size), ngpus, ntasks, port, wandb_run)
 	else:
 		ngpus = torch.cuda.device_count()
-		mp.spawn(my_clip_train, args=(args.in_path, args.out_path, args.model_name, 'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, (args.alpha, args.beta, args.buffer_size), ngpus, port, wandb_run), nprocs=ngpus)
+		ntasks = args.tasks
+		mp.spawn(my_clip_train, args=(args.in_path, args.out_path, args.model_name, 'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, (args.alpha, args.beta, args.buffer_size), ngpus, ntasks, port, wandb_run), nprocs=ntasks)
 
 	
 	
