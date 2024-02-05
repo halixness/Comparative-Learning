@@ -307,8 +307,8 @@ def my_clip_train(rank, in_path, out_path, model_name, source, in_base,
 					clip_preprocessor=clip_preprocess)
 
 	# Load encoder models from memory
-	model = HyperMem(lm_dim=768, knob_dim=128, input_dim=512, hidden_dim=128, output_dim=latent_dim).to(rank)
-	print(f"[-] #params: {count_parameters(model)}")
+	model = HyperMem(lm_dim=512, knob_dim=128, input_dim=512, hidden_dim=128, output_dim=latent_dim, clip_model=clip_model).to(rank)
+	print(f"[-] # params: {count_parameters(model)}")
 	
 	if is_parallel: model = DDP(model, device_ids=[rank])
 	
