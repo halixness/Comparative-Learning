@@ -41,8 +41,9 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory):
 	
 	centroid_sim = torch.rand(1, latent_dim).to(device)
 
-	while ct <= 5:
+	while loss > 0.008:
 		ct += 1
+		if ct > 5: break
 		progressbar = tqdm(range(200))
 		for i in progressbar:
 			# Get Inputs: sim_batch, (sim_batch, 4, 128, 128)
@@ -71,7 +72,7 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory):
 				"train/loss_dif": loss_dif.detach().item()
 			}
 
-			progressbar.set_description(f"loss: {loss.item():.2f}")
+			progressbar.set_description(f"loss: {loss.item():.4f}")
 			optimizer.zero_grad()
 			loss.backward()
 			optimizer.step()
@@ -81,9 +82,9 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory):
 				loss_dif.detach().item())
 		
 	############ save model #########
-	with torch.no_grad():
-		memory[lesson] = {"centroid": centroid_sim}
-		memory[lesson]["params"] = model.get_weights(lesson)
+	# with torch.no_grad():
+	# 	memory[lesson] = {"centroid": centroid_sim}
+	# 	memory[lesson]["params"] = model.get_weights(lesson)
 	return model
 
 def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memory):
@@ -122,11 +123,8 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 					ans.append(torch.full((batch_size_i, 1), 1000.0).squeeze(1))
 					continue
 
-				with torch.no_grad():
-					emb = clip_model.encode_image(images).float() # B, 512
-
 				# compute stats
-				z, _ = model(label, emb)
+				z, _ = model(clip_model, images)
 				z = z.squeeze(0)
 				centroid_i = memory[label]["centroid"]
 				centroid_i = centroid_i.repeat(batch_size_i, 1)
@@ -228,7 +226,6 @@ if __name__ == "__main__":
 				help='Pretrained model import name (saved in outpath)', required=False)
 	args = argparser.parse_args()
 
-	"""
 	wandb.login()
 	config = {
 		"lr": lr,
@@ -238,8 +235,7 @@ if __name__ == "__main__":
 		"batch_size": batch_size,
 		"latent_dim": latent_dim
 	}
-	wandb_run = wandb.init(name="hypernet_regularized", project="hypernet-concept-learning", config=config)
-	"""
+	wandb_run = wandb.init(name="polytropon", project="hypernet-concept-learning", config=config)
 
 	my_clip_train(args.in_path, args.out_path, args.model_name,
 				'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train)
