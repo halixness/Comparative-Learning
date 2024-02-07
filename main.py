@@ -170,7 +170,7 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 
 
 def my_clip_train(in_path, out_path, model_name, source, in_base,
-				types, dic, vocab, pre_trained_model=None):
+				types, dic, vocab, pre_trained_model=None, n_skills=None):
 	# get data
 	clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
 	dt = MyDataset(in_path, source, in_base, types, dic, vocab,
@@ -182,7 +182,7 @@ def my_clip_train(in_path, out_path, model_name, source, in_base,
 	model = SkilledMixin(
 		model=model,
 		n_tasks=n_concepts,
-		n_skills=3, # domains: colors, materials, shapes
+		n_skills=n_skills, # domains: colors, materials, shapes
 		freeze=False
 	).to(device)
 
@@ -224,20 +224,27 @@ if __name__ == "__main__":
 				help='Best model memory to be saved file name', required=False)
 	argparser.add_argument('--pre_train', '-p', default=None,
 				help='Pretrained model import name (saved in outpath)', required=False)
+	argparser.add_argument('--skills', '-s', default=3, type=int,
+				help='Number of skills', required=True)
+	argparser.add_argument('--wandb', '-w', default=None,
+				help='Enable wandb logging', required=False)
 	args = argparser.parse_args()
 
-	wandb.login()
-	config = {
-		"lr": lr,
-		"sim_batch": sim_batch,
-		"gen_batch": gen_batch,
-		"epochs": epochs,
-		"batch_size": batch_size,
-		"latent_dim": latent_dim
-	}
-	wandb_run = wandb.init(name="polytropon", project="hypernet-concept-learning", config=config)
+	if args.wandb is not None:
+		wandb.login()
+		config = {
+			"lr": lr,
+			"sim_batch": sim_batch,
+			"gen_batch": gen_batch,
+			"epochs": epochs,
+			"batch_size": batch_size,
+			"latent_dim": latent_dim,
+			"n_tasks": len(colors) + len(shapes) + len(materials),
+			"n_skills": args.skills,
+		}
+		wandb_run = wandb.init(name="polytropon", project="hypernet-concept-learning", config=config)
 
 	my_clip_train(args.in_path, args.out_path, args.model_name,
-				'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train)
+				'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, args.skills)
 
 	
