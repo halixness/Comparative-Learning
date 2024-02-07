@@ -18,6 +18,8 @@ from transformers import BertTokenizer, BertModel
 from config import *
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 class CLIP_AE_Encode(nn.Module):
 	def __init__(self, hidden_dim, latent_dim, isAE=False):

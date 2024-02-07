@@ -13,6 +13,7 @@ import wandb
 import torch.nn.functional as F
 
 from torch.utils.data import DataLoader
+from polytropon import SkilledMixin
 
 from config import *
 from dataset import *
@@ -23,6 +24,9 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 wandb_run = None
 
 def my_train_clip_encoder(dt, model, attr, lesson, memory):
+
+	n_concepts = len(colors) + len(shapes) + len(materials)
+	task_ids = torch.LongTensor(list(range(0, n_concepts))).to(device)
 
 	# get model
 	clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
@@ -44,22 +48,18 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory):
 			# Get Inputs: sim_batch, (sim_batch, 4, 128, 128)
 			base_name_sim, images_sim = dt.get_better_similar(attr, lesson)
 			images_sim = images_sim.to(device)
-			with torch.no_grad():
-				emb = clip_model.encode_image(images_sim).float() # B, 512
 
 			# run similar model
-			z_sim, _ = model(lesson, emb)
+			z_sim = model(task_ids, clip_model, images_sim)
 			centroid_sim = centroid_sim.detach()
 			centroid_sim, loss_sim = get_sim_loss(torch.vstack((z_sim, centroid_sim)))
 
 			# Run Difference
 			base_name_dif, images_dif = dt.get_better_similar_not(attr, lesson)
 			images_dif = images_dif.to(device)
-			with torch.no_grad():
-				emb = clip_model.encode_image(images_dif).float() # B, 512
-
+			
 			# run difference model
-			z_dif, _ = model(lesson, emb)
+			z_dif = model(task_ids, clip_model, images_dif)
 			loss_dif = get_sim_not_loss(centroid_sim, z_dif)
 
 			# compute loss
@@ -70,12 +70,6 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory):
 				"train/loss_sim": loss_sim.detach().item(),
 				"train/loss_dif": loss_dif.detach().item()
 			}
-
-			if len(memory.keys()) > 0:  # hyper-output regularization
-				regularizer_loss = compute_regularizer_loss(model, memory)
-				loss += regularizer_loss
-				log["regularizer_loss"] = regularizer_loss.detach().item()
-				log["loss"] = loss.detach().item()
 
 			progressbar.set_description(f"loss: {loss.item():.2f}")
 			optimizer.zero_grad()
@@ -91,29 +85,6 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory):
 		memory[lesson] = {"centroid": centroid_sim}
 		memory[lesson]["params"] = model.get_weights(lesson)
 	return model
-
-def compute_regularizer_loss(model:HyperMem, memory:dict) -> th.Tensor:
-	"""
-		Wrt. previous task memory of weights, enforce them to the given hypermodel
-		Inputs:
-			model:HyperMem		a hypernetwork memory
-			memory:dict			a dictionary of the form {lesson1: {params:[], ...}, ...}
-		Outputs:
-			loss:th.Tensor		mean task weight loss
-	"""
-	loss = None
-	for lesson, val in memory.items(): # for each old task
-		old_params = val["params"]
-		new_params = model.get_weights(lesson)
-		task_loss = None
-		for k in old_params.keys(): # for each param
-			loss = F.mse_loss(old_params[k], new_params[k])
-			if task_loss is None: task_loss = loss
-			else: task_loss += loss
-		if loss is None: loss = task_loss
-		else: loss = torch.hstack((loss, task_loss))
-	return torch.mean(loss)
-		
 
 def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memory):
 	with torch.no_grad():
@@ -208,7 +179,16 @@ def my_clip_train(in_path, out_path, model_name, source, in_base,
 					clip_preprocessor=clip_preprocess)
 
 	# load encoder models from memory
-	model = HyperMem(lm_dim=768, knob_dim=128, input_dim=512, hidden_dim=128, output_dim=latent_dim).to(device)
+	model = CLIP_AE_Encode(hidden_dim=hidden_dim_clip, latent_dim=latent_dim).to(device)
+	n_concepts = len(colors) + len(shapes) + len(materials)
+	model = SkilledMixin(
+		model=model,
+		n_tasks=n_concepts,
+		n_skills=3, # domains: colors, materials, shapes
+		freeze=False
+	).to(device)
+
+	print(f"[-] # params: {count_parameters(model)}")
 
 	best_nt = 0
 	t_tot = 0
@@ -248,6 +228,7 @@ if __name__ == "__main__":
 				help='Pretrained model import name (saved in outpath)', required=False)
 	args = argparser.parse_args()
 
+	"""
 	wandb.login()
 	config = {
 		"lr": lr,
@@ -258,7 +239,8 @@ if __name__ == "__main__":
 		"latent_dim": latent_dim
 	}
 	wandb_run = wandb.init(name="hypernet_regularized", project="hypernet-concept-learning", config=config)
-	
+	"""
+
 	my_clip_train(args.in_path, args.out_path, args.model_name,
 				'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train)
 
