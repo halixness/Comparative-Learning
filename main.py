@@ -82,8 +82,8 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory):
 				loss_dif.detach().item())
 		
 	############ save model #########
-	# with torch.no_grad():
-	# 	memory[lesson] = {"centroid": centroid_sim}
+	with torch.no_grad():
+		memory[lesson] = {"centroid": centroid_sim}
 	# 	memory[lesson]["params"] = model.get_weights(lesson)
 	return model
 
