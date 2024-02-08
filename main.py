@@ -25,7 +25,7 @@ wandb_run = None
 
 def my_train_clip_encoder(dt, model, attr, lesson, memory, task_id):
 
-	task_ids = torch.LongTensor([0] * sim_batch).to(device) # [task_id], they don't matter?
+	task_ids = torch.LongTensor([0] * sim_batch).to(device) # [task_id], it won't matter?
 
 	# get model
 	clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
@@ -41,6 +41,7 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, task_id):
 	centroid_sim = torch.rand(1, latent_dim).to(device)
 
 	while loss > 0.008:
+		break
 		ct += 1
 		if ct > 5: break
 		progressbar = tqdm(range(200))
@@ -88,8 +89,6 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, task_id):
 
 def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memory, task_id):
 
-	task_ids = torch.LongTensor([0] * sim_batch).to(device) # [task_id], they don't matter?
-
 	with torch.no_grad():
 		# get vocab dictionary
 		if source == 'train':
@@ -126,6 +125,7 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 					continue
 
 				# compute stats
+				task_ids = torch.LongTensor([0] * images.shape[0]).to(device) # [task_id], it won't matter?
 				z = model(task_ids, clip_model, images)
 				z = z.squeeze(0)
 				centroid_i = memory[label]["centroid"]
