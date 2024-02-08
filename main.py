@@ -41,7 +41,6 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, task_id):
 	centroid_sim = torch.rand(1, latent_dim).to(device)
 
 	while loss > 0.008:
-		break
 		ct += 1
 		if ct > 5: break
 		progressbar = tqdm(range(200))
