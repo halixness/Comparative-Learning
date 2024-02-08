@@ -88,6 +88,10 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory):
 	return model
 
 def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memory):
+
+	n_concepts = len(colors) + len(shapes) + len(materials)
+	task_ids = torch.LongTensor(list(range(0, n_concepts))).to(device)
+
 	with torch.no_grad():
 		# get vocab dictionary
 		if source == 'train':
@@ -124,7 +128,7 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 					continue
 
 				# compute stats
-				z, _ = model(clip_model, images)
+				z = model(task_ids, clip_model, images)
 				z = z.squeeze(0)
 				centroid_i = memory[label]["centroid"]
 				centroid_i = centroid_i.repeat(batch_size_i, 1)
