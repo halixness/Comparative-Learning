@@ -23,10 +23,9 @@ random.seed(1337)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 wandb_run = None
 
-def my_train_clip_encoder(dt, model, attr, lesson, memory):
+def my_train_clip_encoder(dt, model, attr, lesson, memory, task_id):
 
-	n_concepts = len(colors) + len(shapes) + len(materials)
-	task_ids = torch.LongTensor(list(range(0, n_concepts))).to(device)
+	task_ids = torch.LongTensor([0] * sim_batch).to(device) # [task_id], they don't matter?
 
 	# get model
 	clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
@@ -87,10 +86,9 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory):
 	# 	memory[lesson]["params"] = model.get_weights(lesson)
 	return model
 
-def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memory):
+def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memory, task_id):
 
-	n_concepts = len(colors) + len(shapes) + len(materials)
-	task_ids = torch.LongTensor(list(range(0, n_concepts))).to(device)
+	task_ids = torch.LongTensor([0] * sim_batch).to(device) # [task_id], they don't matter?
 
 	with torch.no_grad():
 		# get vocab dictionary
@@ -172,7 +170,6 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 				top3_shape/tot_num, top3/tot_num)
 	return top3/tot_num
 
-
 def my_clip_train(in_path, out_path, model_name, source, in_base,
 				types, dic, vocab, pre_trained_model=None, n_skills=None):
 	# get data
@@ -187,6 +184,7 @@ def my_clip_train(in_path, out_path, model_name, source, in_base,
 		model=model,
 		n_tasks=n_concepts,
 		n_skills=n_skills, # domains: colors, materials, shapes
+		skilled_variant="custom",
 		freeze=False
 	).to(device)
 
@@ -196,13 +194,14 @@ def my_clip_train(in_path, out_path, model_name, source, in_base,
 	t_tot = 0
 	memory = {}
 	for i in range(epochs):
+		i = 0
 		for tl in types_learning:  # attr
 			random.shuffle(dic[tl])
 			for vi in dic[tl]:  # lesson
 				# Train
 				print("#################### Learning: " + str(i) + " ----- " + str(vi))
 				t_start = time.time()
-				model = my_train_clip_encoder(dt, model, tl, vi, memory)
+				model = my_train_clip_encoder(dt, model, tl, vi, memory, i)
 				t_end = time.time()
 				t_dur = t_end - t_start
 				t_tot += t_dur
@@ -210,13 +209,13 @@ def my_clip_train(in_path, out_path, model_name, source, in_base,
 
 				# Evaluate
 				top_nt = my_clip_evaluation(in_path, 'novel_test/', model,
-								bsn_novel_test_1, ['rgba'], dic_train, vocab, memory)
+								bsn_novel_test_1, ['rgba'], dic_train, vocab, memory, i)
 				if top_nt > best_nt:
 					best_nt = top_nt
 					print("++++++++++++++ BEST NT: " + str(best_nt))
 					# with open(os.path.join(out_path, model_name), 'wb') as handle:
 					#	pickle.dump(memory, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
+				i += 1
 
 if __name__ == "__main__":
 	argparser = argparse.ArgumentParser()
@@ -230,6 +229,8 @@ if __name__ == "__main__":
 				help='Pretrained model import name (saved in outpath)', required=False)
 	argparser.add_argument('--skills', '-s', default=3, type=int,
 				help='Number of skills', required=True)
+	argparser.add_argument('--lr', '-lr', default=1e-3, type=float,
+				help='Learning rate', required=True)
 	argparser.add_argument('--wandb', '-w', default=None,
 				help='Enable wandb logging', required=False)
 	args = argparser.parse_args()
@@ -248,7 +249,7 @@ if __name__ == "__main__":
 		}
 		wandb_run = wandb.init(name="polytropon", project="hypernet-concept-learning", config=config)
 
+	lr = args.lr
+
 	my_clip_train(args.in_path, args.out_path, args.model_name,
 				'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, args.skills)
-
-	
