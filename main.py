@@ -23,7 +23,46 @@ random.seed(1337)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 wandb_run = None
 
-def my_train_clip_encoder(dt, model, attr, lesson, memory, task_id):
+def get_buffer_distribution(buffer):
+	if len(buffer.data) > 0:
+		notions = {}
+		for sample in buffer.data:
+			notions.setdefault(sample["x_lesson"], 0)
+			notions[sample["x_lesson"]] += 1 / len(buffer.data)
+		return notions
+	else: return None
+
+class Buffer:
+	def __init__(self, alpha:float, beta:float, size:int, warmup:int=1):
+		self.data = []
+		self.numbers = []
+		self.largest_idx = None
+		self.size = size
+		self.alpha = alpha
+		self.beta = beta
+		self.warmup = warmup
+
+	def get_sample(self) -> object:
+		if len(self.data) > self.warmup:
+			idx = int(random.uniform(0, len(self.data)-1))
+			return self.data[idx]
+		else: return None
+		
+	def add_sample(self, x:object) -> None:
+		""" Add new object with reservoir strategy """
+		random_no = random.uniform(0, 1)
+		if len(self.data) < self.size: 
+			self.data.append(x)
+			self.numbers.append(random_no)
+			if self.largest_idx is None or random_no > self.numbers[self.largest_idx]:
+				self.largest_idx = len(self.data) - 1
+		elif random_no < self.numbers[self.largest_idx]:
+			self.data[self.largest_idx] = x
+			self.numbers[self.largest_idx] = random_no
+			self.largest_idx = np.argmax(self.numbers)
+
+
+def my_train_clip_encoder(dt, model, attr, lesson, memory, task_id, buffer):
 
 	task_ids = torch.LongTensor([0] * sim_batch).to(device) # [task_id], it won't matter?
 
@@ -43,7 +82,7 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, task_id):
 	while loss > 0.008:
 		ct += 1
 		if ct > 5: break
-		progressbar = tqdm(range(200))
+		progressbar = tqdm(range(iters_per_concept))
 		for i in progressbar:
 			# Get Inputs: sim_batch, (sim_batch, 4, 128, 128)
 			base_name_sim, images_sim = dt.get_better_similar(attr, lesson)
@@ -62,14 +101,37 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, task_id):
 			z_dif = model(task_ids, clip_model, images_dif)
 			loss_dif = get_sim_not_loss(centroid_sim, z_dif)
 
+			# Dark Experience Replay (++)
+			reg = None
+			if buffer is not None:
+				sample1 = buffer.get_sample()
+				sample2 = buffer.get_sample()
+				if sample1 and sample2:
+					# Component 1: matching the logits
+					n1_z_sim = model(task_ids, clip_model, sample1["images_sim"].to(device))
+					n1_z_dif = model(task_ids, clip_model, sample1["images_dif"].to(device))
+					reg_loss1 = buffer.alpha * (F.mse_loss(n1_z_sim, sample1["z_sim"].to(device)) + F.mse_loss(n1_z_dif, sample1["z_dif"].to(device)))
+					# Component 2: matching the labels (but it's unsupervised)
+					n2_z_sim = model(task_ids, clip_model, sample2["images_sim"].to(device))
+					n2_z_dif = model(task_ids, clip_model, sample2["images_dif"].to(device))
+					reg_loss_sim = h_get_sim_loss(n2_z_sim, sample2["centroid"].to(device))
+					reg_loss_dif = get_sim_not_loss(sample2["centroid"].to(device), n2_z_dif)
+					reg_loss2 = buffer.beta * ((reg_loss_sim)**2 + (reg_loss_dif-1)**2)
+					# DER++
+					reg =  reg_loss1 + reg_loss2
+
 			# compute loss
 			loss = (loss_sim)**2 + (loss_dif-1)**2
+			if reg: loss = loss + reg
 
 			log = {
 				"train/loss": loss.detach().item(),
 				"train/loss_sim": loss_sim.detach().item(),
-				"train/loss_dif": loss_dif.detach().item()
+				"train/loss_dif": loss_dif.detach().item(),
+				"epoch": task_id,
+				"centroid": torch.mean(centroid_sim)
 			}
+			if reg is not None: log["train/regularizer"] = reg
 
 			progressbar.set_description(f"loss: {loss.item():.4f}")
 			optimizer.zero_grad()
@@ -77,8 +139,23 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, task_id):
 			optimizer.step()
 			if wandb_run: wandb_run.log(log)
 
+			# Update reservoir
+			if buffer is not None:
+				with torch.no_grad():
+					buffer.add_sample({
+						"x_lesson": lesson,
+						"images_sim": images_sim.detach().cpu(),
+						"images_dif": images_dif.detach().cpu(),
+						"z_sim": z_sim.detach().cpu(),
+						"z_dif": z_dif.detach().cpu(),
+						"centroid": centroid_sim.detach().cpu()
+					})
+				del sample1
+				del sample2
+
 		print('[', ct, ']', loss.detach().item(), loss_sim.detach().item(),
 				loss_dif.detach().item())
+		print(f"buffer: {get_buffer_distribution(buffer)}")
 		
 	############ save model #########
 	with torch.no_grad():
@@ -170,7 +247,7 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 	return top3/tot_num
 
 def my_clip_train(in_path, out_path, model_name, source, in_base,
-				types, dic, vocab, pre_trained_model=None, n_skills=None):
+				types, dic, vocab, pre_trained_model=None, n_skills=None, buffer_size=200):
 	# get data
 	clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
 	dt = MyDataset(in_path, source, in_base, types, dic, vocab,
@@ -189,6 +266,12 @@ def my_clip_train(in_path, out_path, model_name, source, in_base,
 
 	print(f"[-] # params: {count_parameters(model)}")
 
+	# Define a buffer
+	alpha, beta = 0.5, 0.5
+	if buffer_size is not None:
+		buffer = Buffer(alpha=alpha, beta=beta, size=buffer_size, warmup=iters_per_concept)
+	else: buffer = None
+
 	best_nt = 0
 	t_tot = 0
 	memory = {}
@@ -200,7 +283,7 @@ def my_clip_train(in_path, out_path, model_name, source, in_base,
 				# Train
 				print("#################### Learning: " + str(i) + " ----- " + str(vi))
 				t_start = time.time()
-				model = my_train_clip_encoder(dt, model, tl, vi, memory, i)
+				model = my_train_clip_encoder(dt, model, tl, vi, memory, i, buffer)
 				t_end = time.time()
 				t_dur = t_end - t_start
 				t_tot += t_dur
@@ -217,7 +300,10 @@ def my_clip_train(in_path, out_path, model_name, source, in_base,
 				i += 1
 
 if __name__ == "__main__":
-	argparser = argparse.ArgumentParser()
+	argparser = argparse.ArgumentParser(
+		prog="Complex Comparative Learning (Polytropon)",
+		description="Alternative to hypernetworks: Polytropon, combining modular skills in multitask learning. Paper: https://arxiv.org/abs/2202.13914"
+	)
 	argparser.add_argument('--in_path', '-i',
 				help='Data input path', required=True)
 	argparser.add_argument('--out_path', '-o',
@@ -232,6 +318,8 @@ if __name__ == "__main__":
 				help='Learning rate', required=True)
 	argparser.add_argument('--wandb', '-w', default=None,
 				help='Enable wandb logging', required=False)
+	argparser.add_argument('--buffer_size', '-bf', default=None, type=int,
+				help='Enable DER++ regularization with reservoir sampling replay buffer of given size')
 	args = argparser.parse_args()
 
 	if args.wandb is not None:
@@ -245,10 +333,11 @@ if __name__ == "__main__":
 			"latent_dim": latent_dim,
 			"n_tasks": len(colors) + len(shapes) + len(materials),
 			"n_skills": args.skills,
+			"buffer_size": args.buffer_size
 		}
 		wandb_run = wandb.init(name="polytropon", project="hypernet-concept-learning", config=config)
 
 	lr = args.lr
 
 	my_clip_train(args.in_path, args.out_path, args.model_name,
-				'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, args.skills)
+				'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, args.skills, args.buffer_size)

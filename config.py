@@ -93,6 +93,7 @@ bsn_test_2_old = "bsn_test_2_old.txt"
 resize = 224
 lr = 1e-3
 epochs = 50
+iters_per_concept = 200
 
 sim_batch = 128
 gen_batch = 128
@@ -101,3 +102,4 @@ batch_size = 32
 # model architecture
 hidden_dim_clip = 128
 latent_dim = 16
+
