@@ -34,13 +34,10 @@ class CLIP_AE_Encode(nn.Module):
 		else:
 			self.filter = nn.Parameter(torch.rand((512)))
 
-	def forward(self, clip_model, images):
-		with torch.no_grad():
-			emb = clip_model.encode_image(images).float()
-		out = emb * self.filter
+	def forward(self, images):
+		out = images * self.filter
 		out = self.relu(self.fc1(out))
 		z = self.fc2(out)
-
 		return z
      
 

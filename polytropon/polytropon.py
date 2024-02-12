@@ -29,7 +29,7 @@ class SkilledMixin(nn.Module):
         n_tasks: int,
         n_skills: int,
         skilled_variant: str = "learned", # general, beyond Transformers
-        freeze: bool = True,
+        freeze: bool = False,
         custom_skills: str = None,
         state_dict = None,
     ):
@@ -43,7 +43,7 @@ class SkilledMixin(nn.Module):
             for p in self.model.parameters():
                 p.requires_grad = False
 
-        adapter_class, only_attention = VARIANT2CLASS.get(skilled_variant, (SkilledLoRALinear, False))
+        adapter_class, only_attention = (SkilledLoRALinear, False)
         self.adapter_class = adapter_class
         skills = self.get_skills(custom_skills)
         replace_layers(self.model, adapter_class, n_tasks, n_skills, skills, only_attention=only_attention)
@@ -74,10 +74,13 @@ class SkilledMixin(nn.Module):
     def forward(self, task_ids, *args, add_prior=False, **kwargs):
         inform_layers(self.model, self.adapter_class, task_ids)
         outputs = self.model.forward(*args, **kwargs)
-
+        
+        """
+        # First prior: Indian Buffet Process
         if self.training and self.skilled_variant == "learned" and add_prior:
             aux_loss = [self.neg_log_IBP(p) for n, p in self.model.named_parameters() if "skill_logits" in n]
             outputs.loss += torch.stack(aux_loss).sum()
+        """
 
         return outputs
 

@@ -109,13 +109,15 @@ class SkilledLoRALinear(SkilledModule):
                  skills: Optional[Tensor],
                  weight: Tensor,
                  bias: Optional[Tensor],
-                 r: int = 16,
-                 freeze: bool = False # we assume the underlying weights are not pre-trained 
+                 r: int = 128, # original: 16, too much of a bottleneck
+                 freeze: bool = False # we assume the underlying weights are not pre-trained
                  ) -> None:
         super().__init__()
         self.out_features, self.in_features = weight.shape
         self.r = r
-
+        
+        self.training = True
+        
         if skills is None:
             self.skill_logits = nn.Parameter(torch.empty((n_tasks, n_skills)).uniform_(-1e-3, 1e-3))
             self.is_learned = True
@@ -155,14 +157,15 @@ class SkilledLoRALinear(SkilledModule):
         if repeats > 1:
             self.task_ids = torch.repeat_interleave(self.task_ids, repeats, dim=0)
 
-        skill_logits = self.skill_logits[self.task_ids]
+        # From given task, what skills to use?
+        skill_logits = self.skill_logits[self.task_ids] # (B, s) picks the skills for those task ids
         if self.is_learned:
             if self.training:
                 skill_logits = RelaxedBernoulli(temperature=1., logits=skill_logits).rsample()
             else:
                 skill_logits = torch.sigmoid(skill_logits)
         skill_logits = skill_logits / (skill_logits.sum(dim=-1, keepdim=True) + EPS)
-
+        # r is an intermediate repr.size for batch mm
         skills_weight_A = torch.mm(skill_logits, self.skills_weight_A).view(input.size()[0], self.in_features, self.r)
         skills_weight_B = torch.mm(skill_logits, self.skills_weight_B).view(input.size()[0], self.r, self.out_features)
         output = torch.matmul(input, skills_weight_A) # bsi,bir->bsr
