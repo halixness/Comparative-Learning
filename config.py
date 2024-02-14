@@ -92,11 +92,11 @@ bsn_test_2_old = "bsn_test_2_old.txt"
 # train parameters
 resize = 224
 lr = 1e-3
-epochs = 50
+epochs = 1000 # 5 epochs * 23 concepts * 200 iters = 23000
 iters_per_concept = 200
 
-sim_batch = 128
-gen_batch = 128
+sim_batch = 32
+gen_batch = 32
 batch_size = 32
 
 # model architecture

@@ -62,9 +62,7 @@ class Buffer:
 			self.numbers[self.largest_idx] = random_no
 			self.largest_idx = np.argmax(self.numbers)
 
-def my_train_clip_encoder(dt, model, attr, lesson, memory, task_id, buffer, optimizer):
-
-	print(f"[+] Polytropon task #{task_id}")
+def my_concept_fwdpass(dt, model, attr, lesson, memory, task_id, buffer, progressbar, epoch):
 
 	task_ids = torch.LongTensor([task_id] * sim_batch).to(device) # [task_id], it won't matter?
 
@@ -78,95 +76,85 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, task_id, buffer, opti
 	loss = 10
 	ct = 0
 	
-	centroid_sim = torch.rand(1, latent_dim).to(device)
+	if lesson not in memory.keys():
+		centroid_sim = torch.rand(1, latent_dim).to(device)
+	else: centroid_sim = memory[lesson]["centroid"].to(device)
 
-	while loss > 0.008:
-		ct += 1
-		if ct > 5: break
-		progressbar = tqdm(range(iters_per_concept))
-		for i in progressbar:
-			optimizer.zero_grad()
-			# Get Inputs: sim_batch, (sim_batch, 4, 128, 128)
-			base_name_sim, images_sim = dt.get_better_similar(attr, lesson)
-			images_sim = images_sim.to(device)
-			with torch.no_grad():
-				sim_emb = clip_model.encode_image(images_sim).float()
+	# Get Inputs: sim_batch, (sim_batch, 4, 128, 128)
+	base_name_sim, images_sim = dt.get_better_similar(attr, lesson)
+	images_sim = images_sim.to(device)
+	with torch.no_grad():
+		sim_emb = clip_model.encode_image(images_sim).float()
 
-			# run similar model
-			z_sim = model(task_ids, sim_emb)
-			centroid_sim = centroid_sim.detach()
-			centroid_sim, loss_sim = get_sim_loss(torch.vstack((z_sim, centroid_sim)))
+	# run similar model
+	z_sim = model(task_ids, sim_emb)
+	centroid_sim = centroid_sim.detach()
+	centroid_sim, loss_sim = get_sim_loss(torch.vstack((z_sim, centroid_sim)))
 
-			# Run Difference
-			base_name_dif, images_dif = dt.get_better_similar_not(attr, lesson)
-			images_dif = images_dif.to(device)
-			with torch.no_grad():
-				dif_emb = clip_model.encode_image(images_dif).float()
-			
-			# run difference model
-			z_dif = model(task_ids, dif_emb)
-			loss_dif = get_sim_not_loss(centroid_sim, z_dif)
+	# Run Difference
+	base_name_dif, images_dif = dt.get_better_similar_not(attr, lesson)
+	images_dif = images_dif.to(device)
+	with torch.no_grad():
+		dif_emb = clip_model.encode_image(images_dif).float()
+	
+	# run difference model
+	z_dif = model(task_ids, dif_emb)
+	loss_dif = get_sim_not_loss(centroid_sim, z_dif)
 
-			# Dark Experience Replay (++)
-			reg = None
-			if buffer is not None:
-				sample1 = buffer.get_sample()
-				sample2 = buffer.get_sample()
-				if sample1 and sample2:
-					# Component 1: matching the logits
-					n1_z_sim = model(task_ids, sample1["sim_emb"].to(device))
-					n1_z_dif = model(task_ids, sample1["dif_emb"].to(device))
-					reg_loss1 = buffer.alpha * (F.mse_loss(n1_z_sim, sample1["z_sim"].to(device)) + F.mse_loss(n1_z_dif, sample1["z_dif"].to(device)))
-					# Component 2: matching the labels (but it's unsupervised)
-					n2_z_sim = model(task_ids, sample2["sim_emb"].to(device))
-					n2_z_dif = model(task_ids, sample2["dif_emb"].to(device))
-					reg_loss_sim = h_get_sim_loss(n2_z_sim, sample2["centroid"].to(device))
-					reg_loss_dif = get_sim_not_loss(sample2["centroid"].to(device), n2_z_dif)
-					reg_loss2 = buffer.beta * ((reg_loss_sim)**2 + (reg_loss_dif-1)**2)
-					# DER++
-					reg =  reg_loss1 + reg_loss2
+	# Dark Experience Replay (++)
+	reg = None
+	if buffer is not None:
+		sample1 = buffer.get_sample()
+		sample2 = buffer.get_sample()
+		if sample1 and sample2:
+			# Component 1: matching the logits
+			n1_z_sim = model(task_ids, sample1["sim_emb"].to(device))
+			n1_z_dif = model(task_ids, sample1["dif_emb"].to(device))
+			reg_loss1 = buffer.alpha * (F.mse_loss(n1_z_sim, sample1["z_sim"].to(device)) + F.mse_loss(n1_z_dif, sample1["z_dif"].to(device)))
+			# Component 2: matching the labels (but it's unsupervised)
+			n2_z_sim = model(task_ids, sample2["sim_emb"].to(device))
+			n2_z_dif = model(task_ids, sample2["dif_emb"].to(device))
+			reg_loss_sim = h_get_sim_loss(n2_z_sim, sample2["centroid"].to(device))
+			reg_loss_dif = get_sim_not_loss(sample2["centroid"].to(device), n2_z_dif)
+			reg_loss2 = buffer.beta * ((reg_loss_sim)**2 + (reg_loss_dif-1)**2)
+			# DER++
+			reg =  reg_loss1 + reg_loss2
 
-			# compute loss
-			loss = (loss_sim)**2 + (loss_dif-1)**2
-			if reg: loss = loss + reg
+	# compute loss
+	loss = (loss_sim)**2 + (loss_dif-1)**2
+	if reg: loss = loss + reg
 
-			log = {
-				"train/loss": loss.detach().item(),
-				"train/loss_sim": loss_sim.detach().item(),
-				"train/loss_dif": loss_dif.detach().item(),
-				"epoch": task_id,
-				"centroid": torch.mean(centroid_sim)
-			}
-			if reg is not None: log["train/regularizer"] = reg
+	log = {
+		"train/loss": loss.detach().item(),
+		"train/loss_sim": loss_sim.detach().item(),
+		"train/loss_dif": loss_dif.detach().item(),
+		"epoch": epoch,
+		"centroid": torch.mean(centroid_sim)
+	}
+	if reg is not None: log["train/regularizer"] = reg
 
-			progressbar.set_description(f"loss: {loss.item():.4f}")
-			loss.backward()
-			optimizer.step()
-			if wandb_run: wandb_run.log(log)
+	progressbar.set_description(f"epoch: {epoch}; loss: {loss.item():.4f}; task_id: {task_id}; lesson: {lesson}")
+	if wandb_run: wandb_run.log(log)
 
-			# Update reservoir
-			if buffer is not None:
-				with torch.no_grad():
-					buffer.add_sample({
-						"x_lesson": lesson,
-						"sim_emb": sim_emb.detach().cpu(),
-						"dif_emb": dif_emb.detach().cpu(),
-						"z_sim": z_sim.detach().cpu(),
-						"z_dif": z_dif.detach().cpu(),
-						"centroid": centroid_sim.detach().cpu()
-					})
-				del sample1
-				del sample2
-
-		print('[', ct, ']', loss.detach().item(), loss_sim.detach().item(),
-				loss_dif.detach().item())
-		if buffer is not None: print(f"buffer: {get_buffer_distribution(buffer)}")
+	# Update reservoir
+	if buffer is not None:
+		with torch.no_grad():
+			buffer.add_sample({
+				"x_lesson": lesson,
+				"sim_emb": sim_emb.detach().cpu(),
+				"dif_emb": dif_emb.detach().cpu(),
+				"z_sim": z_sim.detach().cpu(),
+				"z_dif": z_dif.detach().cpu(),
+				"centroid": centroid_sim.detach().cpu()
+			})
+		del sample1
+		del sample2
 		
 	############ save model #########
 	with torch.no_grad():
 		memory[lesson] = {"centroid": centroid_sim, "task_id": task_id}
 	# 	memory[lesson]["params"] = model.get_weights(lesson)
-	return model
+	return model, loss
 
 def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memory, task_id):
 
@@ -242,16 +230,16 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 				if (ci == 1) and (mi == 1) and (si == 1):
 					top3 += 1
 
-		if wandb_run:
-			wandb_run.log({
-				"test/top3_color": top3_color/tot_num,
-				"test/top3_material": top3_material/tot_num,
-				"test/top3_shape": top3_shape/tot_num,
-				"test/top3": top3/tot_num,
-				"learned_concepts": len(memory.keys())
-			})
-		print(tot_num, top3_color/tot_num, top3_material/tot_num,
-				top3_shape/tot_num, top3/tot_num)
+		scores = {
+			"test/top3_color": top3_color/tot_num,
+			"test/top3_material": top3_material/tot_num,
+			"test/top3_shape": top3_shape/tot_num,
+			"test/top3": top3/tot_num,
+			"learned_concepts": len(memory.keys())
+		}
+		if wandb_run: wandb_run.log(scores)
+		print(scores)
+
 	return top3/tot_num
 
 def my_clip_train(in_path, out_path, model_name, source, in_base,
@@ -273,20 +261,23 @@ def my_clip_train(in_path, out_path, model_name, source, in_base,
 	).to(device)
 
 	# inductive bias as in the paper
+	lr_skills = lr
+	lr_allocation = lr_skills * 1e2
+	print(f"[-] LR skills: {lr_skills}; LR task allocation: {lr_allocation}")
 	optimizer = optim.Adam(
 		[
 			{"params": model.model.fc1.weight},
 			{"params": model.model.fc1.bias},
 			{"params": model.model.fc1.skills_weight_A},
 			{"params": model.model.fc1.skills_weight_B},
-			{"params": model.model.fc1.skill_logits, "lr": 1e-2},
+			{"params": model.model.fc1.skill_logits, "lr": lr_allocation},
 			{"params": model.model.fc2.weight},
 			{"params": model.model.fc2.bias},
 			{"params": model.model.fc2.skills_weight_A},
 			{"params": model.model.fc2.skills_weight_B},
-			{"params": model.model.fc2.skill_logits, "lr": 1e-2},
+			{"params": model.model.fc2.skill_logits, "lr": lr_allocation},
 		],
-		lr=1e-3,
+		lr=lr_skills,
 	)
 
 	print(f"[-] # params: {count_parameters(model)}")
@@ -300,30 +291,31 @@ def my_clip_train(in_path, out_path, model_name, source, in_base,
 	best_nt = 0
 	t_tot = 0
 	memory = {}
-	for i in range(epochs):
-		i = 0
-		for tl in types_learning:  # attr
-			random.shuffle(dic[tl])
-			for vi in dic[tl]:  # lesson
-				# Train
-				print("#################### Learning: " + str(i) + " ----- " + str(vi))
-				t_start = time.time()
-				model = my_train_clip_encoder(dt, model, tl, vi, memory, i, buffer, optimizer)
-				t_end = time.time()
-				t_dur = t_end - t_start
-				t_tot += t_dur
-				print("Time: ", t_dur, t_tot)
 
-				# Evaluate
-				top_nt = my_clip_evaluation(in_path, 'novel_test/', model,
-								bsn_novel_test_1, ['rgba'], dic_train, vocab, memory, i)
-				if top_nt > best_nt:
-					best_nt = top_nt
-					print("++++++++++++++ BEST NT: " + str(best_nt))
-					# with open(os.path.join(out_path, model_name), 'wb') as handle:
-					#	pickle.dump(memory, handle, protocol=pickle.HIGHEST_PROTOCOL)
-				i += 1
-		torch.save(model.state_dict(), "polytropon.pth")
+	all_concepts = [(vi, tl) for tl in types_learning for vi in dic[tl]] # all lessons
+	all_concepts = list(zip(list(range(len(all_concepts))), all_concepts))
+
+	accumulation_steps = len(all_concepts) // 4
+	for epoch in range(epochs):
+		random.shuffle(all_concepts) # shuffle and pass all concepts
+		progressbar = tqdm(all_concepts)
+		epoch_loss = None
+		for concept_idx, concept in progressbar:
+			vi, tl = concept
+			model, loss = my_concept_fwdpass(dt, model, tl, vi, memory, concept_idx, buffer, progressbar, epoch)
+			if not epoch_loss: epoch_loss = loss
+			else: epoch_loss += loss
+		# aggregated concepts loss
+		optimizer.zero_grad()
+		loss.backward()
+		optimizer.step()
+		epoch_loss = None
+
+		# Evaluate
+		if epoch % 5 == 0:
+			my_clip_evaluation(in_path, 'novel_test/', model,
+							bsn_novel_test_1, ['rgba'], dic_train, vocab, memory, epoch)
+			torch.save(model.state_dict(), "polytropon.pth")
 
 if __name__ == "__main__":
 	argparser = argparse.ArgumentParser(
@@ -344,11 +336,16 @@ if __name__ == "__main__":
 				help='Enable wandb logging', required=False)
 	argparser.add_argument('--buffer_size', '-bf', default=None, type=int,
 				help='Enable DER++ regularization with reservoir sampling replay buffer of given size')
+	argparser.add_argument('--lr', '-l', default=1e-4, type=float,
+				help='Learning rate')
 	args = argparser.parse_args()
+
+	lr = args.lr
 
 	if args.wandb is not None:
 		wandb.login()
 		config = {
+			"lr": lr,
 			"sim_batch": sim_batch,
 			"gen_batch": gen_batch,
 			"epochs": epochs,
