@@ -4,3 +4,4 @@ __pycache__
 SOLA
 wandb
 *.out
+.DS_Store
