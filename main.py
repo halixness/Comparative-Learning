@@ -9,6 +9,7 @@ import time
 import wandb
 from tqdm import tqdm
 from typing import List
+from dataset import MyDataset
 
 from config import *
 from dataset import *
@@ -27,11 +28,11 @@ PORT=13777
 
 class TorchDataset(data.Dataset):
 
-    def __init__(self, samples:List[dict]):        
+    def __init__(self, in_path:str):        
         """
             samples:List[object]    {predicate, subject, fact, belief}
         """
-        self.samples = samples
+		self.samples = self.get_training_data(in_path=in_path)
 
     def __len__(self):
         return len(self.samples)
@@ -39,18 +40,19 @@ class TorchDataset(data.Dataset):
     def __getitem__(self, idx:int) -> dict:
         return self.samples[idx]
 
+	def get_training_data(self, in_path:str):
+		# path = os.path.join(in_path, 'train_new_objects_dataset.json')
+		# path = os.path.join(in_path, "final_splits.json") 
+		path = os.path.join(in_path, "small_train_objects.json")
+		with open(path, 'r') as file:
+			# Load JSON data from the file
+			training_data = json.load(file)
+		return training_data
+
 def ddp_setup(rank, world_size:int, port:int):
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(port)
     init_process_group(backend="nccl", rank=rank, world_size=world_size)
-
-def get_training_data(in_path):
-	#path = os.path.join(in_path, 'train_new_objects_dataset.json')
-	path = os.path.join(in_path, "final_splits.json")
-	with open(path, 'r') as file:
-		# Load JSON data from the file
-		training_data = json.load(file)
-	return training_data
 
 def get_batches(base_names, in_path, source):
 	images = []
@@ -189,29 +191,26 @@ def my_clip_train(rank, world_size, in_path, out_path, n_split, model_name, sour
 	model = DDP(model, device_ids=[rank])
 	print(f"[-] # params: {count_parameters(model)}")
 
-	# load training data
-	training_data = get_training_data(in_path)
+	# Training data
+	training_data = TorchDataset(in_path=in_path)
 	size = None
 	# Aligning
-	for s in training_data:
+	for s in training_data.samples:
 		if not size: size = len(s["base_names_sim"])
 		if size != len(s["base_names_sim"]): s["base_names_sim"] = s["base_names_sim"][:size] 
 		if size != len(s["base_names_dif"]): s["base_names_dif"] = s["base_names_sim"][:size]
 	# Check
-	for s in training_data:
+	for s in training_data.samples:
 		if not size: size = len(s["base_names_sim"])
 		assert size == len(s["base_names_sim"]) 
 		assert size == len(s["base_names_dif"]) 
 
-	training_data = TorchDataset(samples=training_data)
 	sola_dataloader = DataLoader(training_data, batch_size=1, sampler=DistributedSampler(training_data), shuffle=False)
 
-	# load encoder models from memory
+	# Run training
 	memory = {}
 	memory = my_train_clip_encoder(rank, sola_dataloader, n_split, memory, in_path, out_path, source, model_name, model)
-	
 	destroy_process_group()
-
 
 if __name__ == "__main__":
 	argparser = argparse.ArgumentParser()
