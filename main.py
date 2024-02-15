@@ -45,8 +45,8 @@ def ddp_setup(rank, world_size:int, port:int):
     init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 def get_training_data(in_path):
-	path = os.path.join(in_path, 'train_new_objects_dataset.json')
-	#path = os.path.join(in_path, "small_train_objects.json")
+	#path = os.path.join(in_path, 'train_new_objects_dataset.json')
+	path = os.path.join(in_path, "final_splits.json")
 	with open(path, 'r') as file:
 		# Load JSON data from the file
 		training_data = json.load(file)
@@ -62,8 +62,20 @@ def get_batches(base_names, in_path, source):
 	images = torch.stack(images, dim = 0)
 	return images
 
-def my_train_clip_encoder(wandb_run, rank, training_data, n_split, memory, in_path, out_path, source, model_name, model):
+def my_train_clip_encoder(rank, training_data, n_split, memory, in_path, out_path, source, model_name, model):
 	
+	if rank == 0:
+		# Logging
+		wandb.login()
+		config = {
+			"sim_batch": sim_batch,
+			"gen_batch": gen_batch,
+			"epochs": epochs,
+			"batch_size": batch_size,
+			"latent_dim": latent_dim,
+		}
+		wandb_run = wandb.init(name="hypernet-logic-der++", project="hypernet-concept-learning", config=config)
+
 	# Model
 	optimizer = optim.Adam(model.parameters(), lr=lr)
 	model.train()
@@ -133,7 +145,6 @@ def my_train_clip_encoder(wandb_run, rank, training_data, n_split, memory, in_pa
 		# Backprop
 		loss.backward()
 		optimizer.step()
-		torch.distributed.barrier()
 
 		# Log
 		log = {
@@ -154,7 +165,7 @@ def my_train_clip_encoder(wandb_run, rank, training_data, n_split, memory, in_pa
 				"z_dif": z_dif.detach(),
 			})
 
-		if wandb_run is not None: wandb_run.log(log)
+		if rank == 0: wandb_run.log(log)
 
 		# Batches for the same lesson are presented in sequence
 		# So for each lesson switch -> save model
@@ -164,9 +175,11 @@ def my_train_clip_encoder(wandb_run, rank, training_data, n_split, memory, in_pa
 				torch.save(model.state_dict(), os.path.join("checkpoints", f"hypernet_learned={len(memory.keys())}_{time.strftime('%Y%m%d-%H%M%S')}.pth"))
 		previous_lesson = lesson
 		i += 1
+		
+		torch.distributed.barrier()
 	return memory
 
-def my_clip_train(rank, wandb_run, world_size, in_path, out_path, n_split, model_name, source):  
+def my_clip_train(rank, world_size, in_path, out_path, n_split, model_name, source):  
 
 	ddp_setup(rank, world_size=world_size, port=PORT)
 
@@ -195,7 +208,7 @@ def my_clip_train(rank, wandb_run, world_size, in_path, out_path, n_split, model
 
 	# load encoder models from memory
 	memory = {}
-	memory = my_train_clip_encoder(wandb_run, rank, sola_dataloader, n_split, memory, in_path, out_path, source, model_name, model)
+	memory = my_train_clip_encoder(rank, sola_dataloader, n_split, memory, in_path, out_path, source, model_name, model)
 	
 	destroy_process_group()
 
@@ -219,18 +232,7 @@ if __name__ == "__main__":
 
 	args = argparser.parse_args()
 
-	# Logging
-	wandb.login()
-	config = {
-		"sim_batch": sim_batch,
-		"gen_batch": gen_batch,
-		"epochs": epochs,
-		"batch_size": batch_size,
-		"latent_dim": latent_dim,
-	}
-	wandb_run = wandb.init(name="hypernet-logic-der++", project="hypernet-concept-learning", config=config)
-
 	# Running in parallel
 	n_split = args.n_split		
 	ngpus = torch.cuda.device_count()
-	mp.spawn(my_clip_train, args=(wandb_run, ngpus, args.in_path, args.out_path, n_split, args.model_name, 'train/'), nprocs=ngpus)
+	mp.spawn(my_clip_train, args=(ngpus, args.in_path, args.out_path, n_split, args.model_name, 'train/'), nprocs=ngpus)
