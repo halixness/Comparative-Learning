@@ -5,14 +5,48 @@ import time
 import pickle
 import argparse
 import torch.optim as optim
+import time
+import wandb
+from tqdm import tqdm
+from typing import List
 
 from config import *
 from dataset import *
 from my_models import *
 from util import *
+from models.hypernetwork import HyperMem, count_parameters
+
+import torch.multiprocessing as mp
+import torch.utils.data as data
+from torch.distributed import init_process_group, destroy_process_group
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader
+
+PORT=13777
+
+class TorchDataset(data.Dataset):
+
+    def __init__(self, samples:List[dict]):        
+        """
+            samples:List[object]    {predicate, subject, fact, belief}
+        """
+        self.samples = samples
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx:int) -> dict:
+        return self.samples[idx]
+
+def ddp_setup(rank, world_size:int, port:int):
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(port)
+    init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 def get_training_data(in_path):
 	path = os.path.join(in_path, 'train_new_objects_dataset.json')
+	#path = os.path.join(in_path, "small_train_objects.json")
 	with open(path, 'r') as file:
 		# Load JSON data from the file
 		training_data = json.load(file)
@@ -21,44 +55,22 @@ def get_training_data(in_path):
 def get_batches(base_names, in_path, source):
 	images = []
 	for base_name in base_names:
-		path = os.path.join(in_path, source, base_name+'_rgba.pickle')
+		path = os.path.join(in_path, source, f"{base_name}_rgba.pickle")
 		with open(path, 'rb') as file:
 			emb = pickle.load(file)
 			images.append(emb)
 	images = torch.stack(images, dim = 0)
 	return images
 
-def my_train_clip_encoder(training_data, n_split, memory, in_path, out_path, source, model_name):
-	# Initialize model
-	def initialize_model(lesson, memory):
-		if lesson in memory.keys():
-			print("______________ loading_____________________")
-			model.load_state_dict(memory[lesson]['model'])
-			optimizer = optim.Adam(model.parameters(), lr=lr)
-			model.train().to(device)
-			centroid_sim = torch.rand(1, latent_dim).to(device)
-		else:
-			model = CLIP_AE_Encode(hidden_dim_clip, latent_dim, isAE=False)
-			optimizer = optim.Adam(model.parameters(), lr=lr)
-			model.train().to(device)
-			centroid_sim = torch.rand(1, latent_dim).to(device)
-		print("#################### Learning: " + lesson)
-		return model, optimizer, centroid_sim
+def my_train_clip_encoder(wandb_run, rank, training_data, n_split, memory, in_path, out_path, source, model_name, model):
 	
-	def save_model(model, previous_lesson, memory, n_split):
-		############ print loss ############
-		print('loss:',loss.detach().item(), 'sim_loss:',loss_sim.detach().item(),'dif_loss:',loss_dif.detach().item())
-		
-		############ save model ############
-		with torch.no_grad():
-			memory[previous_lesson] = {'model': model.to('cpu').state_dict(),
-							'arch': ['Filter', ['para_block1']],
-							'centroid': centroid_sim.to('cpu')
-							}
-		with open(os.path.join(out_path, model_name+'_'+str(n_split)+'.pickle'), 'wb') as handle:
-			pickle.dump(memory, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-		return memory
+	# Model
+	optimizer = optim.Adam(model.parameters(), lr=lr)
+	model.train()
+	centroid_sim = torch.rand(1, latent_dim).to(rank)
+	
+	# Replay buffer
+	buffer = Buffer(alpha=0.5, beta=0.5, size=5000)
 
 	loss_sim = None
 	loss_dif = None
@@ -68,82 +80,124 @@ def my_train_clip_encoder(training_data, n_split, memory, in_path, out_path, sou
 	count = 0
 	lesson = None
 	previous_lesson = 'first_lesson'
-	
-	for i, batch in enumerate(training_data):
+	i = 0
+	for batch in tqdm(training_data):
 		
 		# Get Lesson
-		lesson = batch['lesson']
-
-		# Init model if first lesson
-		if previous_lesson == 'first_lesson':
-			model, optimizer, centroid_sim = initialize_model(lesson,memory)
-			t_start = time.time()
-
-		# If we finished a lesson save it and initialize new model
-		if lesson != previous_lesson and previous_lesson != 'first_lesson':
-			memory = save_model(model, previous_lesson, memory, n_split)
-			############ print time ############
-			t_end = time.time()
-			t_dur = t_end - t_start
-			t_tot += t_dur
-			print("Time: ", t_dur, t_tot)
-			model, optimizer, centroid_sim = initialize_model(lesson,memory)
-			t_start = time.time()
-			count = 0
+		lesson = batch['lesson'][0]
+		base_names_sim = [b[0] for b in batch['base_names_sim']]
+		base_names_dif = [b[0] for b in batch['base_names_dif']]
 		
-		# If loss < 0.008 skip all the remaining batches of the lesson
-		# but it has to have done at least 1000 iterations
-		if loss < 0.008 and count >= 1000 and lesson == previous_lesson:
-			continue
-
-		previous_lesson = lesson
-		count += 1
-
-		base_names_sim = batch['base_names_sim']
-		base_names_dif = batch['base_names_dif']
+		optimizer.zero_grad()
 
 		# Get Inputs: sim_batch, (sim_batch, 4, 132, 132)
 		images_sim = get_batches(base_names_sim, in_path, source)
-		images_sim = images_sim.to(device)
+		images_sim = images_sim.to(rank)
 
 		# run similar model
-		z_sim = model(images_sim)
-		centroid_sim = centroid_sim.unsqueeze(dim=0).detach()
-		centroid_sim, loss_sim = get_sim_loss(torch.vstack((z_sim, centroid_sim)))
+		z_sim, centroid_sim = model(lesson, images_sim)
+		centroid_sim = centroid_sim.squeeze(0)
+		loss_sim = h_get_sim_loss(z_sim, centroid_sim)
 
 		# Run Difference
 		images_dif = get_batches(base_names_dif, in_path, source)
-		images_dif = images_dif.to(device)
+		images_dif = images_dif.to(rank)
 
 		# run difference model
-		z_dif = model(images_dif)
+		z_dif, _ = model(lesson, images_dif)
 		loss_dif = get_sim_not_loss(centroid_sim, z_dif)
 
 		# compute loss
 		loss = (loss_sim)**2 + (loss_dif-1)**2
 
-		optimizer.zero_grad()
+		# Dark Experience Replay (++)
+		sample1 = buffer.get_sample()
+		sample2 = buffer.get_sample()
+		reg = None
+		if sample1 and sample2:
+			# Component 1: matching the logits
+			n1_z_sim, _ = model(sample1["x_lesson"], sample1["x_sim_emb"])
+			n1_z_dif, _ = model(sample1["x_lesson"], sample1["x_dif_emb"])
+			reg_loss1 = buffer.alpha * (F.mse_loss(n1_z_sim, sample1["z_sim"]) + F.mse_loss(n1_z_dif, sample1["z_dif"]))
+			# Component 2: matching the labels (but it's unsupervised)
+			n2_z_sim, n2_centroid = model(sample1["x_lesson"], sample1["x_sim_emb"])
+			n2_z_dif, _ = model(sample1["x_lesson"], sample1["x_dif_emb"])
+			n2_centroid = n2_centroid.squeeze(0)
+			reg_loss_sim = h_get_sim_loss(n2_z_sim, n2_centroid)
+			reg_loss_dif = get_sim_not_loss(n2_centroid, n2_z_dif)
+			reg_loss2 = buffer.beta * ((reg_loss_sim)**2 + (reg_loss_dif-1)**2)
+			# DER++
+			reg =  reg_loss1 + reg_loss2
+			loss = loss + reg
+
+		# Backprop
 		loss.backward()
 		optimizer.step()
+		torch.distributed.barrier()
 
-	memory = save_model(model, previous_lesson, memory, n_split)
+		# Log
+		log = {
+			"train/loss": loss.detach().item(),
+			"train/loss_sim": loss_sim.detach().item(),
+			"train/loss_dif": loss_dif.detach().item(),
+			"centroid": torch.mean(centroid_sim).detach().item()
+		}
+		if reg: log["train/regularizer"] = reg.item()
 
+		# Update reservoir
+		with torch.no_grad():
+			buffer.add_sample({
+				"x_lesson": lesson,
+				"x_sim_emb": images_sim.detach(),
+				"x_dif_emb": images_dif.detach(),
+				"z_sim": z_sim.detach(),
+				"z_dif": z_dif.detach(),
+			})
+
+		if wandb_run is not None: wandb_run.log(log)
+
+		# Batches for the same lesson are presented in sequence
+		# So for each lesson switch -> save model
+		if (rank == 0) and (lesson != previous_lesson):
+			with torch.no_grad():
+				memory[lesson] = True
+				torch.save(model.state_dict(), os.path.join("checkpoints", f"hypernet_learned={len(memory.keys())}_{time.strftime('%Y%m%d-%H%M%S')}.pth"))
+		previous_lesson = lesson
+		i += 1
 	return memory
 
-def my_clip_train(in_path, out_path, n_split, model_name, source):  	
+def my_clip_train(rank, wandb_run, world_size, in_path, out_path, n_split, model_name, source):  
+
+	ddp_setup(rank, world_size=world_size, port=PORT)
+
+	# Load encoder models from memory
+	clip_model, _ = clip.load("ViT-B/32", device=rank)
+	model = HyperMem(lm_dim=512, knob_dim=128, input_dim=512, hidden_dim=128, output_dim=latent_dim, clip_model=clip_model).to(rank)
+	model = DDP(model, device_ids=[rank])
+	print(f"[-] # params: {count_parameters(model)}")
+
 	# load training data
 	training_data = get_training_data(in_path)
+	size = None
+	# Aligning
+	for s in training_data:
+		if not size: size = len(s["base_names_sim"])
+		if size != len(s["base_names_sim"]): s["base_names_sim"] = s["base_names_sim"][:size] 
+		if size != len(s["base_names_dif"]): s["base_names_dif"] = s["base_names_sim"][:size]
+	# Check
+	for s in training_data:
+		if not size: size = len(s["base_names_sim"])
+		assert size == len(s["base_names_sim"]) 
+		assert size == len(s["base_names_dif"]) 
 
-	# select training data
-	filtered_data = []
-	for batch in training_data:
-		if batch['attribute'] in attrs_split[n_split]:
-			filtered_data.append(batch)
-	training_data = None
+	training_data = TorchDataset(samples=training_data)
+	sola_dataloader = DataLoader(training_data, batch_size=1, sampler=DistributedSampler(training_data), shuffle=False)
 
 	# load encoder models from memory
 	memory = {}
-	memory = my_train_clip_encoder(filtered_data, n_split, memory, in_path, out_path, source, model_name)
+	memory = my_train_clip_encoder(wandb_run, rank, sola_dataloader, n_split, memory, in_path, out_path, source, model_name, model)
+	
+	destroy_process_group()
 
 
 if __name__ == "__main__":
@@ -162,13 +216,21 @@ if __name__ == "__main__":
 	
 	argparser.add_argument('--gpu_idx', '-g', default=0,
 				help='Select gpu index', required=False)
-	
-	args = argparser.parse_args()
-	device = "cuda" if torch.cuda.is_available() else "cpu"	
-	gpu_index = int(args.gpu_idx)
-	torch.device(gpu_index)
-	print('gpu:',gpu_index)
 
-	n_split = int(args.n_split)
-		
-	my_clip_train(args.in_path, args.out_path, n_split, args.model_name, 'train/')
+	args = argparser.parse_args()
+
+	# Logging
+	wandb.login()
+	config = {
+		"sim_batch": sim_batch,
+		"gen_batch": gen_batch,
+		"epochs": epochs,
+		"batch_size": batch_size,
+		"latent_dim": latent_dim,
+	}
+	wandb_run = wandb.init(name="hypernet-logic-der++", project="hypernet-concept-learning", config=config)
+
+	# Running in parallel
+	n_split = args.n_split		
+	ngpus = torch.cuda.device_count()
+	mp.spawn(my_clip_train, args=(wandb_run, ngpus, args.in_path, args.out_path, n_split, args.model_name, 'train/'), nprocs=ngpus)

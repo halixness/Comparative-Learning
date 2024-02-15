@@ -1,7 +1,8 @@
 import torch
-
+import numpy as np
 from config import *
 from dataset import *
+import random
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -70,7 +71,7 @@ def get_sim_loss(z):
 	centroid = torch.mean(z, dim=0)
 	loss = 0
 	for i in range(z.shape[0]):
-		loss += F.mse_loss(centroid, z[i])
+		loss += F.mse_loss(centroid, z[i].view(-1))
 
 	return centroid, loss/z.shape[0]
 
@@ -78,10 +79,44 @@ def get_sim_loss(z):
 def get_sim_not_loss(centroid, z):
 	loss = 0
 	for i in range(z.shape[0]):
-		loss += F.mse_loss(centroid, z[i])
+		loss += F.mse_loss(centroid, z[i].view(-1))
 
 	return loss/z.shape[0]
 
 def get_cos_sim(a,b):
 	return torch.nn.functional.cosine_similarity(a, b, dim=1)
 
+def h_get_sim_loss(z, centroid):
+	loss = 0
+	for i in range(z.shape[0]):
+		loss += F.mse_loss(centroid, z[i].view(-1))
+
+	return loss/z.shape[0]
+
+class Buffer:
+	def __init__(self, alpha:float, beta:float, size:int):
+		self.data = []
+		self.numbers = []
+		self.largest_idx = None
+		self.size = size
+		self.alpha = alpha
+		self.beta = beta
+
+	def get_sample(self) -> object:
+		if len(self.data) > 1:
+			idx = int(random.uniform(0, len(self.data)-1))
+			return self.data[idx]
+		else: return None
+		
+	def add_sample(self, x:object) -> None:
+		""" Add new object with reservoir strategy """
+		random_no = random.uniform(0, 1)
+		if len(self.data) < self.size: 
+			self.data.append(x)
+			self.numbers.append(random_no)
+			if self.largest_idx is None or random_no > self.numbers[self.largest_idx]:
+				self.largest_idx = len(self.data) - 1
+		elif random_no < self.numbers[self.largest_idx]:
+			self.data[self.largest_idx] = x
+			self.numbers[self.largest_idx] = random_no
+			self.largest_idx = np.argmax(self.numbers)
