@@ -29,9 +29,7 @@ PORT=13777
 class TorchDataset(data.Dataset):
 
     def __init__(self, in_path:str):        
-        """
-            samples:List[object]    {predicate, subject, fact, belief}
-        """
+        # samples:List[object]    {predicate, subject, fact, belief}
 		self.samples = self.get_training_data(in_path=in_path)
 
     def __len__(self):
