@@ -41,7 +41,7 @@ class TorchDataset(data.Dataset):
 	def get_training_data(self, in_path:str):
 		# path = os.path.join(in_path, 'train_new_objects_dataset.json')
 		# path = os.path.join(in_path, "final_splits.json") 
-		path = os.path.join(in_path, "train_new_objects_1000_dataset.json")
+		path = os.path.join(in_path, "train_new_objects_200_dataset.json")
 		with open(path, 'r') as file:
 			# Load JSON data from the file
 			training_data = json.load(file)
