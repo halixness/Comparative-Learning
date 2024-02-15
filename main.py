@@ -28,16 +28,16 @@ PORT=13777
 
 class TorchDataset(data.Dataset):
 
-    def __init__(self, in_path:str):        
-        # samples:List[object]    {predicate, subject, fact, belief}
+	def __init__(self, in_path:str):        
+		# samples:List[object]    {predicate, subject, fact, belief}
 		self.samples = self.get_training_data(in_path=in_path)
 
-    def __len__(self):
-        return len(self.samples)
+	def __len__(self):
+		return len(self.samples)
 
-    def __getitem__(self, idx:int) -> dict:
-        return self.samples[idx]
-	
+	def __getitem__(self, idx:int) -> dict:
+		return self.samples[idx]
+
 	def get_training_data(self, in_path:str):
 		# path = os.path.join(in_path, 'train_new_objects_dataset.json')
 		# path = os.path.join(in_path, "final_splits.json") 
