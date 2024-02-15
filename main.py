@@ -39,7 +39,7 @@ class TorchDataset(data.Dataset):
 
     def __getitem__(self, idx:int) -> dict:
         return self.samples[idx]
-
+	
 	def get_training_data(self, in_path:str):
 		# path = os.path.join(in_path, 'train_new_objects_dataset.json')
 		# path = os.path.join(in_path, "final_splits.json") 
