@@ -46,7 +46,7 @@ def ddp_setup(rank, world_size:int, port:int):
 
 def get_training_data(in_path):
 	#path = os.path.join(in_path, 'train_new_objects_dataset.json')
-	path = os.path.join(in_path, "final_splits.json")
+	path = os.path.join(in_path, "train_new_objects_dataset.json")
 	with open(path, 'r') as file:
 		# Load JSON data from the file
 		training_data = json.load(file)
