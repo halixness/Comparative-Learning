@@ -24,7 +24,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
-PORT=13777
+PORT=19777
 
 class TorchDataset(data.Dataset):
 
@@ -64,6 +64,7 @@ def get_batches(base_names, in_path, source):
 
 def my_train_clip_encoder(rank, training_data, n_split, memory, in_path, out_path, source, model_name, model):
 	
+	"""
 	if rank == 0:
 		# Logging
 		wandb.login()
@@ -75,7 +76,7 @@ def my_train_clip_encoder(rank, training_data, n_split, memory, in_path, out_pat
 			"latent_dim": latent_dim,
 		}
 		wandb_run = wandb.init(name="hypernet-logic-der++", project="hypernet-concept-learning", config=config)
-
+	"""
 	# Model
 	optimizer = optim.Adam(model.parameters(), lr=lr)
 	model.train()
@@ -165,7 +166,7 @@ def my_train_clip_encoder(rank, training_data, n_split, memory, in_path, out_pat
 				"z_dif": z_dif.detach(),
 			})
 
-		if rank == 0: wandb_run.log(log)
+		#if rank == 0: wandb_run.log(log)
 
 		# Batches for the same lesson are presented in sequence
 		# So for each lesson switch -> save model
@@ -186,13 +187,15 @@ def my_clip_train(rank, checkpoint, resume_iter, world_size, in_path, out_path, 
 	# Load encoder models from memory
 	clip_model, _ = clip.load("ViT-B/32", device=rank)
 	model = HyperMem(lm_dim=512, knob_dim=128, input_dim=512, hidden_dim=128, output_dim=latent_dim, clip_model=clip_model).to(rank)
-	
+	model = DDP(model, device_ids=[rank])
+
 	# Loading model if requested
 	if checkpoint:
-		model.load_state_dict(torch.load(checkpoint))
+		print(f"[+] Loading checkpoint: {checkpoint}")
+		loaded_state_dict = torch.load(checkpoint)
+		model.load_state_dict(loaded_state_dict)
 	
 	# Parallel
-	model = DDP(model, device_ids=[rank])
 	print(f"[-] # params: {count_parameters(model)}")
 
 	# Training data
