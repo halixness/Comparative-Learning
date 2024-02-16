@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH -p edu-thesis
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem-per-cpu=16536M
+#SBATCH --mem-per-cpu=65536
 #SBATCH -N 1
 #SBATCH -t 0-5:00
 
@@ -12,8 +12,4 @@ source /home/diego.calanzone/.bashrc
 source activate semantic_models 
 cd /home/diego.calanzone/glp/der_hypernet
 
-<<<<<<< HEAD
-python main.py -i ../hypernet_learning/SOLA -o out -ct 4 -bf 1000 --wandb 1 --run_name der++ -pp 1 -po 13377
-=======
-python main.py -i SOLA -o out -ct 4 -bf 5000 --wandb 1 --run_name der++
->>>>>>> b89273843287c43bf3e109fcb47a3970942b38a1
+python main.py -i SOLA -o out --buffer_size 10000 --wandb 1 --run_name main_der++

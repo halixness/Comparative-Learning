@@ -108,9 +108,9 @@ def get_buffer_distribution(buffer):
 		return notions
 	else: return None
 
-def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer, rank, ngpus, ntasks, wandb_run):
+def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer, rank, ngpus, wandb_run):
 
-	is_parallel = ntasks > 1
+	is_parallel = False
 	if ngpus == 1: rank = 0
 
 	# get model
@@ -125,7 +125,7 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer, rank, 
 
 	while loss > 0.008:
 		ct += 1
-		if ct >= 4:
+		if ct >= 2:
 			break
 		progressbar = tqdm(range(iters_per_concept // ngpus))
 		for i in progressbar:
@@ -301,10 +301,9 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 def my_clip_train(rank, in_path, out_path, model_name, source, in_base,
 				types, dic, vocab, pre_trained_model, hyperparams, ngpus, port, wandb_run, checkpoint, resume_iter):
 
-	is_parallel = ntasks > 1
-	if ngpus == 1: rank = 0 # fix to one gpu if multi processes on one
-	if is_parallel: ddp_setup(rank, world_size=ntasks, port=port)
-
+	is_parallel = False
+	rank = 0
+	
 	# Get data
 	clip_model, clip_preprocess = clip.load("ViT-B/32", device=rank)
 	dt = MyDataset(in_path, source, in_base, types, dic, vocab,
@@ -341,7 +340,7 @@ def my_clip_train(rank, in_path, out_path, model_name, source, in_base,
 				
 				# Training
 				t_start = time.time()
-				model, memory = my_train_clip_encoder(dt, model, tl, vi, memory, i, buffer, rank, ngpus, ntasks, wandb_run)
+				model, memory = my_train_clip_encoder(dt, model, tl, vi, memory, i, buffer, rank, ngpus, wandb_run)
 				t_end = time.time()
 				t_dur = t_end - t_start
 				t_tot += t_dur
