@@ -5,7 +5,7 @@ import time
 import pickle
 import argparse
 import torch.optim as optim
-import time
+from datetime import datetime
 import wandb
 from tqdm import tqdm
 from typing import List
@@ -172,7 +172,7 @@ def my_train_clip_encoder(rank, training_data, n_split, memory, in_path, out_pat
 		if (rank == 0) and (lesson != previous_lesson):
 			with torch.no_grad():
 				memory[lesson] = True
-				torch.save(model.state_dict(), os.path.join(out_path,"checkpoints", f"hypernet_learned={len(memory.keys())}_{time.strftime('%Y%m%d-%H%M%S')}.pth"))
+				torch.save(model.state_dict(), os.path.join(out_path,"checkpoints", f"hypernet_learned{len(memory.keys())}_{int(round(datetime.now().timestamp()))}.pth"))
 		previous_lesson = lesson
 		i += 1
 		
