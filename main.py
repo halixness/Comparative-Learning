@@ -62,9 +62,8 @@ def get_batches(base_names, in_path, source):
 	images = torch.stack(images, dim = 0)
 	return images
 
-def my_train_clip_encoder(rank, training_data, n_split, memory, in_path, out_path, source, model_name, model):
+def my_train_clip_encoder(resume_iter, rank, training_data, n_split, memory, in_path, out_path, source, model_name, model):
 	
-	"""
 	if rank == 0:
 		# Logging
 		wandb.login()
@@ -76,7 +75,7 @@ def my_train_clip_encoder(rank, training_data, n_split, memory, in_path, out_pat
 			"latent_dim": latent_dim,
 		}
 		wandb_run = wandb.init(name="hypernet-logic-der++", project="hypernet-concept-learning", config=config)
-	"""
+	
 	# Model
 	optimizer = optim.Adam(model.parameters(), lr=lr)
 	model.train()
@@ -95,7 +94,8 @@ def my_train_clip_encoder(rank, training_data, n_split, memory, in_path, out_pat
 	previous_lesson = 'first_lesson'
 	i = 0
 	for batch in tqdm(training_data):
-		
+		if resume_iter and i < resume_iter: continue # skipping steps
+
 		# Get Lesson
 		lesson = batch['lesson'][0]
 		base_names_sim = [b[0] for b in batch['base_names_sim']]
@@ -166,7 +166,7 @@ def my_train_clip_encoder(rank, training_data, n_split, memory, in_path, out_pat
 				"z_dif": z_dif.detach(),
 			})
 
-		#if rank == 0: wandb_run.log(log)
+		if rank == 0: wandb_run.log(log)
 
 		# Batches for the same lesson are presented in sequence
 		# So for each lesson switch -> save model
@@ -211,16 +211,12 @@ def my_clip_train(rank, checkpoint, resume_iter, world_size, in_path, out_path, 
 		if not size: size = len(s["base_names_sim"])
 		assert size == len(s["base_names_sim"]) 
 		assert size == len(s["base_names_dif"]) 
-	# Skipping iters if requested
-	if resume_iter:
-		for idx, s in enumerate(training_data.samples):
-			if idx < resume_iter: del s
 
 	sola_dataloader = DataLoader(training_data, batch_size=1, sampler=DistributedSampler(training_data), shuffle=False)
 
 	# Run training
 	memory = {}
-	memory = my_train_clip_encoder(rank, sola_dataloader, n_split, memory, in_path, out_path, source, model_name, model)
+	memory = my_train_clip_encoder(resume_iter, rank, sola_dataloader, n_split, memory, in_path, out_path, source, model_name, model)
 	destroy_process_group()
 
 if __name__ == "__main__":
