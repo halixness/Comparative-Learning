@@ -28,22 +28,20 @@ PORT=13777
 
 class TorchDataset(data.Dataset):
 
-    def __init__(self, in_path:str):        
-        """
-            samples:List[object]    {predicate, subject, fact, belief}
-        """
+	def __init__(self, in_path:str):        
+		# samples:List[object]    {predicate, subject, fact, belief}
 		self.samples = self.get_training_data(in_path=in_path)
 
-    def __len__(self):
-        return len(self.samples)
+	def __len__(self):
+		return len(self.samples)
 
-    def __getitem__(self, idx:int) -> dict:
-        return self.samples[idx]
+	def __getitem__(self, idx:int) -> dict:
+		return self.samples[idx]
 
 	def get_training_data(self, in_path:str):
 		# path = os.path.join(in_path, 'train_new_objects_dataset.json')
 		# path = os.path.join(in_path, "final_splits.json") 
-		path = os.path.join(in_path, "small_train_objects.json")
+		path = os.path.join(in_path, "train_new_objects_200_dataset.json")
 		with open(path, 'r') as file:
 			# Load JSON data from the file
 			training_data = json.load(file)
@@ -174,7 +172,7 @@ def my_train_clip_encoder(rank, training_data, n_split, memory, in_path, out_pat
 		if (rank == 0) and (lesson != previous_lesson):
 			with torch.no_grad():
 				memory[lesson] = True
-				torch.save(model.state_dict(), os.path.join("checkpoints", f"hypernet_learned={len(memory.keys())}_{time.strftime('%Y%m%d-%H%M%S')}.pth"))
+				torch.save(model.state_dict(), os.path.join(out_path,"checkpoints", f"hypernet_learned={len(memory.keys())}_{time.strftime('%Y%m%d-%H%M%S')}.pth"))
 		previous_lesson = lesson
 		i += 1
 		
