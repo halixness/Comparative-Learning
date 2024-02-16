@@ -94,7 +94,9 @@ def my_train_clip_encoder(resume_iter, rank, training_data, n_split, memory, in_
 	previous_lesson = 'first_lesson'
 	i = 0
 	for batch in tqdm(training_data):
-		if resume_iter and i < resume_iter: continue # skipping steps
+		if resume_iter and i < resume_iter: 
+			i += 1
+			continue # skipping steps
 
 		# Get Lesson
 		lesson = batch['lesson'][0]
