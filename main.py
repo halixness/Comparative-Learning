@@ -181,13 +181,19 @@ def my_train_clip_encoder(rank, training_data, n_split, memory, in_path, out_pat
 		torch.distributed.barrier()
 	return memory
 
-def my_clip_train(rank, world_size, in_path, out_path, n_split, model_name, source):  
+def my_clip_train(rank, checkpoint, resume_iter, world_size, in_path, out_path, n_split, model_name, source):  
 
 	ddp_setup(rank, world_size=world_size, port=PORT)
 
 	# Load encoder models from memory
 	clip_model, _ = clip.load("ViT-B/32", device=rank)
 	model = HyperMem(lm_dim=512, knob_dim=128, input_dim=512, hidden_dim=128, output_dim=latent_dim, clip_model=clip_model).to(rank)
+	
+	# Loading model if requested
+	if checkpoint:
+		model.load_state_dict(torch.load(checkpoint))
+	
+	# Parallel
 	model = DDP(model, device_ids=[rank])
 	print(f"[-] # params: {count_parameters(model)}")
 
@@ -204,6 +210,10 @@ def my_clip_train(rank, world_size, in_path, out_path, n_split, model_name, sour
 		if not size: size = len(s["base_names_sim"])
 		assert size == len(s["base_names_sim"]) 
 		assert size == len(s["base_names_dif"]) 
+	# Skipping iters if requested
+	if resume_iter:
+		for idx, s in enumerate(training_data.samples):
+			if idx < resume_iter: del s
 
 	sola_dataloader = DataLoader(training_data, batch_size=1, sampler=DistributedSampler(training_data), shuffle=False)
 
@@ -229,9 +239,14 @@ if __name__ == "__main__":
 	argparser.add_argument('--gpu_idx', '-g', default=0,
 				help='Select gpu index', required=False)
 
+	argparser.add_argument('--checkpoint', '-w', default=None, help='Resume from checkpoint', type=str, required=False)
+	argparser.add_argument('--resume_iter', '-ri', default=None, help='Resume from given iteration', type=int, required=False)
+
 	args = argparser.parse_args()
+	checkpoint = args.checkpoint
+	resume_iter = args.resume_iter
 
 	# Running in parallel
 	n_split = args.n_split		
 	ngpus = torch.cuda.device_count()
-	mp.spawn(my_clip_train, args=(ngpus, args.in_path, args.out_path, n_split, args.model_name, 'train/'), nprocs=ngpus)
+	mp.spawn(my_clip_train, args=(checkpoint, resume_iter, ngpus, args.in_path, args.out_path, n_split, args.model_name, 'train/'), nprocs=ngpus)
