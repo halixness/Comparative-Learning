@@ -174,8 +174,11 @@ def my_train_clip_encoder(resume_iter, rank, training_data, n_split, memory, in_
 		# So for each lesson switch -> save model
 		if (rank == 0) and (lesson != previous_lesson):
 			with torch.no_grad():
-				memory[lesson] = True
-				torch.save(model.state_dict(), os.path.join(out_path,"checkpoints", f"hypernet_learned{len(memory.keys())}_{int(round(datetime.now().timestamp()))}.pth"))
+				try:
+					memory[lesson] = True
+					torch.save(model.state_dict(), os.path.join(out_path,"checkpoints", f"hypernet_learned{len(memory.keys())}_{int(round(datetime.now().timestamp()))}.pth"))
+				except:
+					print(f"[-] Error saving model for lesson: {lesson}")
 		previous_lesson = lesson
 		i += 1
 		
