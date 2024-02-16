@@ -108,9 +108,10 @@ def get_buffer_distribution(buffer):
 		return notions
 	else: return None
 
-def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer, rank, ngpus, wandb_run):
+def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer, rank, ngpus, ntasks, wandb_run):
 
-	is_parallel = ngpus > 1
+	is_parallel = ntasks > 1
+	if ngpus == 1: rank = 0
 
 	# get model
 	clip_model, clip_preprocess = clip.load("ViT-B/32", device=rank)
@@ -300,8 +301,9 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 def my_clip_train(rank, in_path, out_path, model_name, source, in_base,
 				types, dic, vocab, pre_trained_model, hyperparams, ngpus, port, wandb_run, checkpoint, resume_iter):
 
-	is_parallel = ngpus > 1
-	if is_parallel: ddp_setup(rank, world_size=ngpus, port=port)
+	is_parallel = ntasks > 1
+	if ngpus == 1: rank = 0 # fix to one gpu if multi processes on one
+	if is_parallel: ddp_setup(rank, world_size=ntasks, port=port)
 
 	# Get data
 	clip_model, clip_preprocess = clip.load("ViT-B/32", device=rank)
@@ -309,8 +311,8 @@ def my_clip_train(rank, in_path, out_path, model_name, source, in_base,
 					clip_preprocessor=clip_preprocess)
 
 	# Load encoder models from memory
-	model = HyperMem(lm_dim=768, knob_dim=128, input_dim=512, hidden_dim=128, output_dim=latent_dim).to(rank)
-	print(f"[-] #params: {count_parameters(model)}")
+	model = HyperMem(lm_dim=512, knob_dim=128, input_dim=512, hidden_dim=128, output_dim=latent_dim, clip_model=clip_model).to(rank)
+	print(f"[-] # params: {count_parameters(model)}")
 	
 	# Loading model if requested
 	if checkpoint:
@@ -339,7 +341,7 @@ def my_clip_train(rank, in_path, out_path, model_name, source, in_base,
 				
 				# Training
 				t_start = time.time()
-				model, memory = my_train_clip_encoder(dt, model, tl, vi, memory, i, buffer, rank, ngpus, wandb_run)
+				model, memory = my_train_clip_encoder(dt, model, tl, vi, memory, i, buffer, rank, ngpus, ntasks, wandb_run)
 				t_end = time.time()
 				t_dur = t_end - t_start
 				t_tot += t_dur

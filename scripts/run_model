@@ -12,4 +12,8 @@ source /home/diego.calanzone/.bashrc
 source activate semantic_models 
 cd /home/diego.calanzone/glp/der_hypernet
 
+<<<<<<< HEAD
 python main.py -i ../hypernet_learning/SOLA -o out -ct 4 -bf 1000 --wandb 1 --run_name der++ -pp 1 -po 13377
+=======
+python main.py -i SOLA -o out -ct 4 -bf 5000 --wandb 1 --run_name der++
+>>>>>>> b89273843287c43bf3e109fcb47a3970942b38a1
