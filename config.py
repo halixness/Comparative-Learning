@@ -83,6 +83,7 @@ bsn_novel_test_1 = "bsn_novel_test_1.txt"
 bsn_novel_test_2_nw = "bsn_novel_test_2_nw.txt"
 bsn_novel_test_2_old = "bsn_novel_test_2_old.txt"
 
+bn_train = "bn_train.txt"
 bn_test = "bn_test.txt"
 bsn_test_1 = "bsn_test_1.txt"
 bsn_test_2_nw = "bsn_test_2_nw.txt"
@@ -98,6 +99,7 @@ lesson_iterations = 4
 sim_batch = 128
 gen_batch = 128
 batch_size = 32
+iters_per_concept = 200
 
 # model architecture
 hidden_dim_clip = 128

@@ -19,6 +19,7 @@ import torch.multiprocessing as mp
 from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch
+import time
 
 from config import *
 from dataset import *
@@ -39,16 +40,17 @@ def ddp_setup(rank, world_size:int, port:int):
 
 # https://en.wikipedia.org/wiki/Reservoir_sampling#:~:text=Reservoir%20sampling%20is%20a%20family,to%20fit%20into%20main%20memory.
 class Buffer:
-	def __init__(self, alpha:float, beta:float, size:int):
+	def __init__(self, alpha:float, beta:float, size:int, warmup:int=1):
 		self.data = []
 		self.numbers = []
 		self.largest_idx = None
 		self.size = size
 		self.alpha = alpha
 		self.beta = beta
+		self.warmup = warmup
 
 	def get_sample(self) -> object:
-		if len(self.data) > 1:
+		if len(self.data) > self.warmup:
 			idx = int(random.uniform(0, len(self.data)-1))
 			return self.data[idx]
 		else: return None
@@ -124,7 +126,7 @@ def my_train_clip_encoder(dt, model, attr, lesson, memory, epoch, buffer, rank, 
 		ct += 1
 		if ct >= 4:
 			break
-		progressbar = tqdm(range(200 // ngpus))
+		progressbar = tqdm(range(iters_per_concept // ngpus))
 		for i in progressbar:
 
 			optimizer.zero_grad()
@@ -296,7 +298,7 @@ def my_clip_evaluation(in_path, source, model, in_base, types, dic, vocab, memor
 	return top3/tot_num
 
 def my_clip_train(rank, in_path, out_path, model_name, source, in_base,
-				types, dic, vocab, pre_trained_model, hyperparams, ngpus, port, wandb_run):
+				types, dic, vocab, pre_trained_model, hyperparams, ngpus, port, wandb_run, checkpoint, resume_iter):
 
 	is_parallel = ngpus > 1
 	if is_parallel: ddp_setup(rank, world_size=ngpus, port=port)
@@ -310,20 +312,29 @@ def my_clip_train(rank, in_path, out_path, model_name, source, in_base,
 	model = HyperMem(lm_dim=768, knob_dim=128, input_dim=512, hidden_dim=128, output_dim=latent_dim).to(rank)
 	print(f"[-] #params: {count_parameters(model)}")
 	
+	# Loading model if requested
+	if checkpoint:
+		print(f"[+] Loading from checkpoint: {checkpoint}")
+		model.load_state_dict(torch.load(checkpoint))
+
 	if is_parallel: model = DDP(model, device_ids=[rank])
 	
 	# Define a buffer
 	alpha, beta, buffer_size = hyperparams
-	buffer = Buffer(alpha=alpha, beta=beta, size=buffer_size)
+	buffer = Buffer(alpha=alpha, beta=beta, size=buffer_size, warmup=iters_per_concept)
 
 	best_nt = 0
 	t_tot = 0
 	memory = {}
 	
+	if resume_iter: print(f"[+] Resuming from iter: {resume_iter}")
+
 	for i in range(epochs):
-		for tl in types_learning:
+		for idx, tl in enumerate(types_learning):
+			if resume_iter and idx < resume_iter: continue # skipping if requested
 			random.shuffle(dic[tl])
 			for vi in dic[tl]:
+				
 				print("#################### Learning: " + str(i) + " ----- " + str(vi))
 				
 				# Training
@@ -336,10 +347,8 @@ def my_clip_train(rank, in_path, out_path, model_name, source, in_base,
 
 				# Evaluate
 				if (is_parallel == False) or (is_parallel and rank == 0):
-					top_nt = my_clip_evaluation(in_path, 'novel_test/', model, bsn_novel_test_1, ['rgba'], dic_train, vocab, memory, i, rank)
-					if top_nt > best_nt:
-						best_nt = top_nt
-						print("++++++++++++++ BEST NT: " + str(best_nt))
+					top_nt = my_clip_evaluation(in_path, 'test/', model, bn_test, ['rgba'], dic_test, vocab, memory, i, rank)
+					torch.save(model.state_dict(), os.path.join("checkpoints", f"hypernet_{time.strftime('%Y%m%d-%H%M%S')}.pth"))
 				if is_parallel: torch.distributed.barrier()
 	
 	if is_parallel: destroy_process_group()
@@ -373,7 +382,14 @@ if __name__ == "__main__":
 				help='Enable multi-gpu computing')
 	argparser.add_argument('--port', '-po', default=12355, type=int,
 				help='Multiprocessing port network')
+				
+	argparser.add_argument('--checkpoint', '-ch', default=None, help='Resume from checkpoint', type=str, required=False)
+	argparser.add_argument('--resume_iter', '-ri', default=None, help='Resume from given iteration', type=int, required=False)
+
 	args = argparser.parse_args()
+
+	checkpoint = args.checkpoint
+	resume_iter = args.resume_iter
 
 	if args.wandb:
 		wandb.login()
@@ -393,10 +409,10 @@ if __name__ == "__main__":
 
 	if not args.parallel:
 		ngpus = 1
-		my_clip_train(0, args.in_path, args.out_path, args.model_name, 'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, (args.alpha, args.beta, args.buffer_size), ngpus, port, wandb_run)
+		my_clip_train(0, args.in_path, args.out_path, args.model_name, 'train/', bn_train, ['rgba'], dic_train, vocabs, args.pre_train, (args.alpha, args.beta, args.buffer_size), ngpus, port, wandb_run, checkpoint, resume_iter)
 	else:
 		ngpus = torch.cuda.device_count()
-		mp.spawn(my_clip_train, args=(args.in_path, args.out_path, args.model_name, 'novel_train/', bn_n_train, ['rgba'], dic_train, vocabs, args.pre_train, (args.alpha, args.beta, args.buffer_size), ngpus, port, wandb_run), nprocs=ngpus)
+		mp.spawn(my_clip_train, args=(args.in_path, args.out_path, args.model_name, 'train/', bn_train, ['rgba'], dic_train, vocabs, args.pre_train, (args.alpha, args.beta, args.buffer_size), ngpus, port, wandb_run), nprocs=ngpus)
 
 	
 	
