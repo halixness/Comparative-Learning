@@ -151,6 +151,7 @@ def my_clip_evaluation_logical(model, in_path, preprocessed_images_path, source,
                 # check logical rep retrieved
                 # for the nk logical relations associated with each image check the validy wrt the image 
                 for i in indices[bi]:
+                    print(i)
                     tot_num_logical += 1
                     # check validity
                     prop = logical_vocabs[i].split(' ')
