@@ -55,10 +55,10 @@ def my_clip_evaluation_base(model, in_path, preprocessed_images_path, source, in
             for label in vocabs:
 
                 # compute stats
-				z, centroid_i = model(label, images)
-				z = z.squeeze(0)
-				centroid_i = centroid_i.repeat(batch_size_i, 1)
-				disi = ((z - centroid_i)**2).mean(dim=1)
+                z, centroid_i = model(label, images)
+                z = z.squeeze(0)
+                centroid_i = centroid_i.repeat(batch_size_i, 1)
+                disi = ((z - centroid_i)**2).mean(dim=1)
                 ans.append(disi.detach().to('cpu'))
 
             # get top3 incicies
@@ -124,10 +124,10 @@ def my_clip_evaluation_logical(model, in_path, preprocessed_images_path, source,
             for label in logical_vocabs:
 
                 # compute stats
-				z, centroid_i = model(label, images)
-				z = z.squeeze(0)
-				centroid_i = centroid_i.repeat(batch_size_i, 1)
-				disi = ((z - centroid_i)**2).mean(dim=1)
+                z, centroid_i = model(label, images)
+                z = z.squeeze(0)
+                centroid_i = centroid_i.repeat(batch_size_i, 1)
+                disi = ((z - centroid_i)**2).mean(dim=1)
                 ans_logical.append(disi.detach().to('cpu'))
             
             # get top3 incicies
@@ -215,6 +215,7 @@ if __name__ == "__main__":
     argparser.add_argument('--in_path', type=str, required=True)
     argparser.add_argument('--preprocessed_images_path', type=str, required=True)
     argparser.add_argument('--checkpoint', type=str, required=True)
+    argparser.add_argument('--plot_path', type=str, required=True)
     args = argparser.parse_args()
 
     # Loading model
@@ -278,7 +279,7 @@ if __name__ == "__main__":
     plt.title('Logical Pattern Recognition')
     plt.legend()
     plt.grid(True)
-    plt.savefig(pieces[0]+'plt_final_hyper.png')
+    plt.savefig(args.plot_path+'plt_final_hyper.png')
     plt.show()
 
     # and errors
@@ -307,5 +308,5 @@ if __name__ == "__main__":
     plt.title('AND Pattern Categories Error Rate')
     plt.legend()
     plt.grid(True)
-    plt.savefig(pieces[0]+'plt_and_hyper.png')
+    plt.savefig(args.plot_path+'plt_and_hyper.png')
     plt.show()
