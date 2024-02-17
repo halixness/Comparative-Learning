@@ -99,18 +99,18 @@ def my_clip_evaluation_logical(model, in_path, preprocessed_images_path, source,
         dt = MyDataset(in_path, source, in_base, types, dic, vocab)
         data_loader = DataLoader(dt, batch_size=129, shuffle=True)
 
-        tot_num = 0
-        score_and = 0
-        tot_num_and = 0
+        tot_num = 1
+        score_and = 1
+        tot_num_and = 1
         errors_and = dict()
 
-        score_or = 0
-        tot_num_or = 0
+        score_or = 1
+        tot_num_or = 1
 
-        score_not = 0
-        tot_num_not = 0
+        score_not = 1
+        tot_num_not = 1
 
-        tot_num_logical = 0
+        tot_num_logical = 1
 
         for base_is, names in data_loader:
 
@@ -135,7 +135,6 @@ def my_clip_evaluation_logical(model, in_path, preprocessed_images_path, source,
             ans_logical = torch.stack(ans_logical, dim=1)
             # for each image get the nk smallest distances indexes, so we can check the logical relations
             values, indices = ans_logical.topk(nk, largest=False) # 106 is the number of logical relations true for each image
-            print('b',indices.size())
             _, indices_lb = base_is.topk(3)
             indices_lb, _ = torch.sort(indices_lb)
 
@@ -147,7 +146,7 @@ def my_clip_evaluation_logical(model, in_path, preprocessed_images_path, source,
                 material = vocabs[indices_lb[bi][1]]
                 shape = vocabs[indices_lb[bi][2]]
                 atrs = [color, material, shape]
-                print(atrs)
+                #print(atrs)
 
                 # check logical rep retrieved
                 # for the nk logical relations associated with each image check the validy wrt the image 
@@ -155,7 +154,7 @@ def my_clip_evaluation_logical(model, in_path, preprocessed_images_path, source,
                     tot_num_logical += 1
                     # check validity
                     prop = logical_vocabs[i].split(' ')
-                    print(prop)
+                    #print(prop)
 
                     if 'not' in prop:
                         attr1 = prop[1]
@@ -242,7 +241,7 @@ if __name__ == "__main__":
     and_err_new_obj = list()
     and_err_var = list()
 
-    for nk in range(1,67):
+    for nk in range(1,10):#67):
         print(nk)
         tot_score, not_score, and_score, or_score, and_err = my_clip_evaluation_logical(model, args.in_path, args.preprocessed_images_path, 'train/', 'no_test.txt', types, dic_train_logical, vocab, nk)
         log_new_obj.append([tot_score, not_score, and_score, or_score])
