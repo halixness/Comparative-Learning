@@ -125,6 +125,7 @@ def my_clip_evaluation_logical(model, in_path, preprocessed_images_path, source,
 
                 # compute stats
                 z, centroid_i = model(label, images)
+                print(z.shape())
                 z = z.squeeze(0)
                 z = z.squeeze(1)
                 centroid_i = centroid_i.repeat(batch_size_i, 1)
