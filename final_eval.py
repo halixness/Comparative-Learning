@@ -130,6 +130,7 @@ def my_clip_evaluation_logical(model, in_path, preprocessed_images_path, source,
                 centroid_i = centroid_i.repeat(batch_size_i, 1)
                 disi = ((z - centroid_i)**2).mean(dim=1)
                 ans_logical.append(disi.detach().to('cpu'))
+                print(ans_logical.size())
             
             # get top3 incicies
             ans_logical = torch.stack(ans_logical, dim=1)
