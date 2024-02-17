@@ -136,7 +136,7 @@ def my_clip_evaluation_logical(model, in_path, preprocessed_images_path, source,
             ans_logical = torch.stack(ans_logical, dim=1)
             # for each image get the nk smallest distances indexes, so we can check the logical relations
             values, indices = ans_logical.topk(nk, largest=False) # 106 is the number of logical relations true for each image
-
+            print(indices.size())
             _, indices_lb = base_is.topk(3)
             indices_lb, _ = torch.sort(indices_lb)
 
