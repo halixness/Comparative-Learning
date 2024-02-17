@@ -4,6 +4,7 @@ import clip
 
 from torch.utils.data import DataLoader
 
+from collections import OrderedDict
 from config import *
 from my_dataset import *
 from my_models import *
@@ -54,7 +55,7 @@ def my_clip_evaluation_base(model, in_path, preprocessed_images_path, source, in
             for label in vocabs:
 
                 # compute stats
-				z, centroid_i = model(label, emb)
+				z, centroid_i = model(label, images)
 				z = z.squeeze(0)
 				centroid_i = centroid_i.repeat(batch_size_i, 1)
 				disi = ((z - centroid_i)**2).mean(dim=1)
@@ -123,11 +124,11 @@ def my_clip_evaluation_logical(model, in_path, preprocessed_images_path, source,
             for label in logical_vocabs:
 
                 # compute stats
-				z, centroid_i = model(label, emb)
+				z, centroid_i = model(label, images)
 				z = z.squeeze(0)
 				centroid_i = centroid_i.repeat(batch_size_i, 1)
 				disi = ((z - centroid_i)**2).mean(dim=1)
-                ans.append(disi.detach().to('cpu'))
+                ans_logical.append(disi.detach().to('cpu'))
             
             # get top3 incicies
             ans_logical = torch.stack(ans_logical, dim=1)
@@ -280,7 +281,7 @@ if __name__ == "__main__":
     plt.savefig(pieces[0]+'plt_final_hyper.png')
     plt.show()
 
-# and errors
+    # and errors
     list1 = and_err_new_obj  # Replace [...] with your actual data
     list2 = and_err_var  # Replace [...] with your actual data
 
