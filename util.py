@@ -68,10 +68,10 @@ def get_mse_loss_more(recons, images):
 
 
 def get_sim_loss(z):
-	centroid = torch.mean(z, dim=0)
+	centroid = torch.mean(z, dim=0).unsqueeze(0)
 	loss = 0
 	for i in range(z.shape[0]):
-		loss += F.mse_loss(centroid, z[i].view(-1))
+		loss += F.mse_loss(centroid.squeeze(0), z[i].view(-1).unsqueeze(0))
 
 	return centroid, loss/z.shape[0]
 
@@ -79,7 +79,7 @@ def get_sim_loss(z):
 def get_sim_not_loss(centroid, z):
 	loss = 0
 	for i in range(z.shape[0]):
-		loss += F.mse_loss(centroid, z[i].view(-1))
+		loss += F.mse_loss(centroid.squeeze(0), z[i].view(-1).unsqueeze(0))
 
 	return loss/z.shape[0]
 

@@ -19,7 +19,6 @@ import torch.nn.functional as F
 from config import *
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-
 class CLIP_AE_Encode(nn.Module):
 	def __init__(self, hidden_dim, latent_dim, isAE=False):
 		super(CLIP_AE_Encode, self).__init__()
@@ -27,20 +26,19 @@ class CLIP_AE_Encode(nn.Module):
 		self.fc1 = nn.Linear(512, hidden_dim)
 		self.fc2 = nn.Linear(hidden_dim, latent_dim)
 		self.relu = nn.ReLU(inplace=True)
+		self.txt_fc1 = nn.Linear(512, latent_dim)
 
 		if isAE:
 			self.filter = nn.Parameter(torch.ones((512)))
 		else:
 			self.filter = nn.Parameter(torch.rand((512)))
 
-	def forward(self, clip_model, images):
-		with torch.no_grad():
-			emb = clip_model.encode_image(images).float()
-		out = emb * self.filter
+	def forward(self, images, lesson):
+		out = images * self.filter
 		out = self.relu(self.fc1(out))
 		z = self.fc2(out)
-
-		return z
+		zt = self.txt_fc1(lesson) # B,512 -> B,16
+		return z, zt
 
 class Decoder(nn.Module):
 	def __init__(self, latent_dim):

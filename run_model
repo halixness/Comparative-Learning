@@ -13,6 +13,6 @@
 module load cuda/11.8
 source /home/diego.calanzone/.bashrc
 source activate semantic_models 
-cd /home/diego.calanzone/glp/hypernet
+cd /mnt/cimec-storage6/users/diego.calanzone/logical-comparative-learning
 
-python main.py -i ../SOLA_dataset_preprocessed/my_datasets/ -o out
+python main.py -i /mnt/cimec-storage6/shared/filippo_diego_datasets/my_datasets -o out
