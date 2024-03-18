@@ -55,10 +55,10 @@ def my_clip_evaluation_base(model, in_path, preprocessed_images_path, source, in
             for label in vocabs:
 
                 # compute stats
-				z, centroid_i = model(label, images)
-				z = z.squeeze(0)
-				centroid_i = centroid_i.repeat(batch_size_i, 1)
-				disi = ((z - centroid_i)**2).mean(dim=1)
+                z, centroid_i = model(label, images)
+                z = z.squeeze(0)
+                centroid_i = centroid_i.repeat(batch_size_i, 1)
+                disi = ((z - centroid_i)**2).mean(dim=1)
                 ans.append(disi.detach().to('cpu'))
 
             # get top3 incicies
@@ -99,18 +99,18 @@ def my_clip_evaluation_logical(model, in_path, preprocessed_images_path, source,
         dt = MyDataset(in_path, source, in_base, types, dic, vocab)
         data_loader = DataLoader(dt, batch_size=129, shuffle=True)
 
-        tot_num = 0
-        score_and = 0
-        tot_num_and = 0
+        tot_num = 1
+        score_and = 1
+        tot_num_and = 1
         errors_and = dict()
 
-        score_or = 0
-        tot_num_or = 0
+        score_or = 1
+        tot_num_or = 1
 
-        score_not = 0
-        tot_num_not = 0
+        score_not = 1
+        tot_num_not = 1
 
-        tot_num_logical = 0
+        tot_num_logical = 1
 
         for base_is, names in data_loader:
 
@@ -124,17 +124,17 @@ def my_clip_evaluation_logical(model, in_path, preprocessed_images_path, source,
             for label in logical_vocabs:
 
                 # compute stats
-				z, centroid_i = model(label, images)
-				z = z.squeeze(0)
-				centroid_i = centroid_i.repeat(batch_size_i, 1)
-				disi = ((z - centroid_i)**2).mean(dim=1)
+                z, centroid_i = model(label, images)
+                z = z.squeeze(0)
+                z = z.squeeze(1)
+                centroid_i = centroid_i.repeat(batch_size_i, 1)
+                disi = ((z - centroid_i)**2).mean(dim=1)
                 ans_logical.append(disi.detach().to('cpu'))
             
             # get top3 incicies
             ans_logical = torch.stack(ans_logical, dim=1)
             # for each image get the nk smallest distances indexes, so we can check the logical relations
             values, indices = ans_logical.topk(nk, largest=False) # 106 is the number of logical relations true for each image
-
             _, indices_lb = base_is.topk(3)
             indices_lb, _ = torch.sort(indices_lb)
 
@@ -146,6 +146,7 @@ def my_clip_evaluation_logical(model, in_path, preprocessed_images_path, source,
                 material = vocabs[indices_lb[bi][1]]
                 shape = vocabs[indices_lb[bi][2]]
                 atrs = [color, material, shape]
+                #print(atrs)
 
                 # check logical rep retrieved
                 # for the nk logical relations associated with each image check the validy wrt the image 
@@ -153,6 +154,7 @@ def my_clip_evaluation_logical(model, in_path, preprocessed_images_path, source,
                     tot_num_logical += 1
                     # check validity
                     prop = logical_vocabs[i].split(' ')
+                    print(prop)
 
                     if 'not' in prop:
                         attr1 = prop[1]
@@ -215,6 +217,7 @@ if __name__ == "__main__":
     argparser.add_argument('--in_path', type=str, required=True)
     argparser.add_argument('--preprocessed_images_path', type=str, required=True)
     argparser.add_argument('--checkpoint', type=str, required=True)
+    argparser.add_argument('--plot_path', type=str, required=True)
     args = argparser.parse_args()
 
     # Loading model
@@ -278,7 +281,7 @@ if __name__ == "__main__":
     plt.title('Logical Pattern Recognition')
     plt.legend()
     plt.grid(True)
-    plt.savefig(pieces[0]+'plt_final_hyper.png')
+    plt.savefig(args.plot_path+'plt_final_hyper.png')
     plt.show()
 
     # and errors
@@ -307,5 +310,5 @@ if __name__ == "__main__":
     plt.title('AND Pattern Categories Error Rate')
     plt.legend()
     plt.grid(True)
-    plt.savefig(pieces[0]+'plt_and_hyper.png')
+    plt.savefig(args.plot_path+'plt_and_hyper.png')
     plt.show()

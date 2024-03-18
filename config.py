@@ -1,6 +1,6 @@
 #%%
 from itertools import product
-
+from pprint import pprint
 '''
 Learning Attributes:
 	- Color (6)
@@ -90,10 +90,15 @@ for i in types_learning:
 						pass
 					else:
 						types_logical.append(i+' '+j+' '+h)
+
 types_logical_with_learning =  types_logical + types_learning 
 
 dic_train_logical = dic_train.copy()
+rel_to_skip = ['color or color', 'material or material','shape or shape']
+
 for rel in types_logical:
+	if rel in rel_to_skip:
+		continue
 	if rel.split(' ')[0] == 'not':
 		attr = rel.split(' ')[1]
 		dic_train_logical[rel] = [f'not {x}' for x in dic_train[attr]]
@@ -114,7 +119,9 @@ for v in dic_train_logical.values():
 	for n in v:
 		if n not in others and n not in vocabs:
 			logical_vocabs.append(n)
+
 all_vocabs = vocabs + logical_vocabs
+
 
 # count n of concepts
 
@@ -202,4 +209,24 @@ batch_size = 33
 # model architecture
 hidden_dim_clip = 128
 latent_dim = 16
+
+#%%
+# count true rels for object
+#color = 'red'
+#materal = 'metal'
+#shape = 'cube'
+#attrs = [color, materal, shape]
+#count = 0
+#for r in logical_vocabs:
+#	rel = r.split()
+#	if 'not' in rel:
+#		if rel[1] not in attrs:
+#			count += 1
+#	if 'and' in rel:
+#		if rel[0] in attrs and rel[2] in attrs:
+#			count += 1
+#	if 'or' in rel:
+#		if rel[0] in attrs or rel[2] in attrs:
+#			count += 1
+#print(count) # !!!!!! = 66
 
