@@ -26,13 +26,21 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 
-PORT=19777
+PORT = 19777
+TASK_IDS = {
+	"and": 0,
+	"or": 1,
+	"not": 2
+}
+# TASK_IDS["primitive"] = 3
 
 class TorchDataset(data.Dataset):
 
 	def __init__(self, in_path:str):        
 		# samples:List[object]    {predicate, subject, fact, belief}
 		self.samples = self.get_training_data(in_path=in_path)
+		self.uniform_batches(shuffle=True)
+		self.allocate_tasks()
 
 	def __len__(self):
 		return len(self.samples)
@@ -41,6 +49,7 @@ class TorchDataset(data.Dataset):
 		return self.samples[idx]
 
 	def get_training_data(self, in_path:str):
+		""" Load lessons batches from json file """
 		# path = os.path.join(in_path, 'train_new_objects_dataset.json')
 		# path = os.path.join(in_path, "final_splits.json") -
 		print("[-] Loading dataset...")
@@ -49,6 +58,33 @@ class TorchDataset(data.Dataset):
 			# Load JSON data from the file
 			training_data = json.load(file)
 		return training_data
+
+	def uniform_batches(self, shuffle:bool=False):
+		""" Checks # examples per batch, uniforms it """
+		size = None
+		# Aligning
+		for s in self.samples:
+			if not size: size = len(s["base_names_sim"])
+			if size != len(s["base_names_sim"]): s["base_names_sim"] = s["base_names_sim"][:size] 
+			if size != len(s["base_names_dif"]): s["base_names_dif"] = s["base_names_sim"][:size]
+		# Check
+		for s in self.samples:
+			if not size: size = len(s["base_names_sim"])
+			assert size == len(s["base_names_sim"]) 
+			assert size == len(s["base_names_dif"]) 
+		if shuffle: random.shuffle(self.samples)
+
+	def allocate_tasks(self):
+		""" Sets task IDs for modular skill sharing """
+		filtered = []
+		for s in self.samples: # parse lesson name and label by logical concept or base concept
+			for operator in TASK_IDS.keys():
+				if operator in s["lesson"].lower(): 
+					s["task_id"] = TASK_IDS[operator]
+					filtered.append(s)
+					break
+		del self.samples
+		self.samples = filtered
 
 def get_batches(base_names, in_path, source):
 	images = []
@@ -60,7 +96,7 @@ def get_batches(base_names, in_path, source):
 	images = torch.stack(images, dim = 0)
 	return images
 
-def my_concept_fwdpass(sample, clip_model, model, memory, progressbar, epoch, in_path, source, device, wandb_run):
+def my_concept_fwdpass(sample, clip_model, model, memory, progressbar, epoch, in_path, source, device, config):
 
 	task_ids = torch.LongTensor([sample["task_id"]] * sim_batch).to(device)
 	model.train()
@@ -111,7 +147,7 @@ def my_concept_fwdpass(sample, clip_model, model, memory, progressbar, epoch, in
 		"centroid": torch.mean(centroid_sim.detach())
 	}
 
-	if wandb_run: wandb_run.log(log)
+	wandb.log(log)
 	progressbar.set_description(f"epoch: {epoch}; loss: {loss.detach().item():.4f}; task_id: {sample['task_id']}; lesson: {lesson}")
 
 	############ save model #########
@@ -119,45 +155,21 @@ def my_concept_fwdpass(sample, clip_model, model, memory, progressbar, epoch, in
 		memory[lesson] = {"centroid": centroid_sim.detach()}
 	return model, loss
 
-def my_clip_train(rank, checkpoint, resume_iter, world_size, in_path, out_path, model_name, source, wandb_run):  
+def my_clip_train(rank, checkpoint, resume_iter, world_size, in_path, out_path, model_name, source, config):  
 	
 	clip_model, _ = clip.load("ViT-B/32", device=device)
 
 	# Training data
 	training_data = TorchDataset(in_path=in_path)
-	size = None
-	# Aligning
-	for s in training_data.samples:
-		if not size: size = len(s["base_names_sim"])
-		if size != len(s["base_names_sim"]): s["base_names_sim"] = s["base_names_sim"][:size] 
-		if size != len(s["base_names_dif"]): s["base_names_dif"] = s["base_names_sim"][:size]
-	# Check
-	for s in training_data.samples:
-		if not size: size = len(s["base_names_sim"])
-		assert size == len(s["base_names_sim"]) 
-		assert size == len(s["base_names_dif"]) 
-
-	random.shuffle(training_data.samples)
-
-	# Tag samples with task ids
-	TASK_IDS = {
-		"concept": 0,
-		"and": 1,
-		"or": 2,
-		"not": 3
-	}
-	for s in training_data.samples: # parse lesson name and label by logical concept or base concept
-		terms = s["lesson"].split(" ")
-		if len(terms) == 3: s["task_id"] = TASK_IDS[terms[1]]
-		elif len(terms) == 2: s["task_id"] = TASK_IDS[terms[0]]
-		else: s["task_id"] = TASK_IDS["concept"]
 
 	# Training the model
 	model = CLIP_AE_Encode(hidden_dim=hidden_dim_clip, latent_dim=latent_dim).to(rank)
-	n_concepts = len(colors) + len(shapes) + len(materials)
+	# n_concepts = len(colors) + len(shapes) + len(materials)
+	n_concepts = 6 # color, material, shape, and, or, not
+	n_tasks = len(TASK_IDS.keys()) # and, or, not
 	model = SkilledMixin(
 		model=model,
-		n_tasks=len(TASK_IDS.keys()),
+		n_tasks=n_tasks,
 		n_skills=n_concepts, # domains: colors, materials, shapes
 		skilled_variant="learned",
 		freeze=False
@@ -168,8 +180,8 @@ def my_clip_train(rank, checkpoint, resume_iter, world_size, in_path, out_path, 
 		model.load_state_dict(torch.load(checkpoint))
 
 	# inductive bias as in the paper
-	lr_skills = lr
-	lr_allocation = lr_skills * 1e2
+	lr_skills = config["lr"]
+	lr_allocation = lr_skills * 1e2 # 1e-2
 	print(f"[-] LR skills: {lr_skills}; LR task allocation: {lr_allocation}")
 	optimizer = optim.Adam(
 		[
@@ -193,14 +205,15 @@ def my_clip_train(rank, checkpoint, resume_iter, world_size, in_path, out_path, 
 	memory = {}
 	if resume_iter: print(f"[+] Resuming from iter: {resume_iter}")
 
-	accumulation_steps = 128
+	accumulation_steps = config["accumulation_steps"]
+	epochs = config["epochs"]
 	for epoch in range(epochs):
 		if resume_iter and epoch < resume_iter: continue # skipping if requested
 		progressbar = tqdm(training_data)
 		epoch_loss = None
 		idx = 0
 		for concept in progressbar:
-			model, loss = my_concept_fwdpass(concept, clip_model, model, memory, progressbar, epoch, in_path, source, rank, wandb_run)
+			model, loss = my_concept_fwdpass(concept, clip_model, model, memory, progressbar, epoch, in_path, source, rank, config)
 			if not epoch_loss: epoch_loss = loss.item()
 			else: epoch_loss += loss.item()
 			if idx % accumulation_steps == 0:
@@ -212,46 +225,36 @@ def my_clip_train(rank, checkpoint, resume_iter, world_size, in_path, out_path, 
 		# Save model snapshot
 		torch.save(model.state_dict(), f"polytropon_e{epoch}_{time.strftime('%Y%m%d-%H%M%S')}.pth")
 
-if __name__ == "__main__":
-	argparser = argparse.ArgumentParser()
-	argparser.add_argument('--in_path', '-i',
-				help='Data input path', required=True)
-	
-	argparser.add_argument('--out_path', '-o',
-				help='Model memory output path', required=True)
+# Main
+argparser = argparse.ArgumentParser()
+argparser.add_argument('--in_path', '-i',
+			help='Data input path', default="/mnt/cimec-storage6/shared/filippo_diego_datasets/my_datasets")
 
-	argparser.add_argument('--run_name', '-r',
-				help='Model memory output path', default=None, type=str, required=False)
+argparser.add_argument('--out_path', '-o',
+			help='Model memory output path', default="out")
 
-	argparser.add_argument('--accumulation_steps', '-ac', default=128,
-				help='Split number', required=False)
-	
-	argparser.add_argument('--model_name', '-n', default='first_try_model',
-				help='Best model memory to be saved file name', required=False)
-	
-	argparser.add_argument('--gpu_idx', '-g', default=0,
-				help='Select gpu index', required=False)
+argparser.add_argument('--run_name', '-r',
+			help='Model memory output path', default="polytropon", type=str)
 
-	argparser.add_argument('--checkpoint', '-w', default=None, help='Resume from checkpoint', type=str, required=False)
-	argparser.add_argument('--resume_iter', '-ri', default=None, help='Resume from given iteration', type=int, required=False)
+argparser.add_argument('--model_name', '-n', default='complex_model',
+			help='Best model memory to be saved file name')
 
-	args = argparser.parse_args()
-	checkpoint = args.checkpoint
-	resume_iter = args.resume_iter
 
-	# Running in parallel
-	wandb_run = None
-	if args.run_name:
-		wandb.login()
-		wandb_run = wandb.init(
-			project="complex-concept-learning",
-			name=args.run_name,
-			config={
-				"accumulation_steps": args.accumulation_steps,
-				"learning_rate": lr,
-				"epochs": epochs,
-				"n_skills": len(colors) + len(shapes) + len(materials),
-				"n_tasks": 4,
-			}
-		)
-	my_clip_train(0, checkpoint, resume_iter, 1, args.in_path, args.out_path, args.model_name, 'train/', wandb_run)
+argparser.add_argument('--accumulation_steps', type=int)
+argparser.add_argument('--lr', type=float)
+argparser.add_argument('--epochs', type=int)
+
+argparser.add_argument('--checkpoint', '-w', default=None, help='Resume from checkpoint', type=str, required=False)
+argparser.add_argument('--resume_iter', '-ri', default=None, help='Resume from given iteration', type=int, required=False)
+
+args = argparser.parse_args()
+checkpoint = args.checkpoint
+resume_iter = args.resume_iter
+config = {
+	"lr": args.lr,
+	"epochs": args.epochs,
+	"accumulation_steps": args.accumulation_steps,
+}
+# Running
+wandb.init(project="complex-concept-learning", name="agent")
+my_clip_train(0, checkpoint, resume_iter, 1, args.in_path, args.out_path, args.model_name, 'train/', config)

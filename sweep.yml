@@ -1,0 +1,17 @@
+method: grid
+metric:
+  goal: minimize
+  name: train/loss
+parameters:
+  accumulation_steps:
+    values:
+      - 128
+      - 1024
+      - 2048
+  epochs:
+    value: 1
+  lr:
+    values:
+      - 0.0001
+      - 0.001
+      - 0.0003

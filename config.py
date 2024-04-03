@@ -199,7 +199,7 @@ bsn_test_2_old = "bsn_test_2_old.txt"
 
 # train parameters
 resize = 224
-lr = 1e-3
+lr = 1e-4
 epochs = 2
 
 sim_batch = 132

@@ -15,4 +15,4 @@ source /home/diego.calanzone/.bashrc
 source activate semantic_models 
 cd /mnt/cimec-storage6/users/diego.calanzone/logical-comparative-learning
 
-python main.py -i /mnt/cimec-storage6/shared/filippo_diego_datasets/my_datasets -o out
+python main.py -i /mnt/cimec-storage6/shared/filippo_diego_datasets/my_datasets -o out --accumulation_steps 1024 --run_name complex_polytropon
