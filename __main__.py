@@ -27,12 +27,13 @@ from torch.utils.data import DataLoader
 import torch.nn.functional as F
 
 PORT = 19777
+LEARN_PRIMITIVES=False
 TASK_IDS = {
 	"and": 0,
 	"or": 1,
 	"not": 2
 }
-# TASK_IDS["primitive"] = 3
+if LEARN_PRIMITIVES: TASK_IDS["primitive"] = 3
 
 class TorchDataset(data.Dataset):
 
@@ -83,6 +84,11 @@ class TorchDataset(data.Dataset):
 					s["task_id"] = TASK_IDS[operator]
 					filtered.append(s)
 					break
+				elif LEARN_PRIMITIVES and len(s["lesson"].split(" ")) == 1: # single concept
+					s["task_id"] = TASK_IDS["primitive"]
+					filtered.append(s)
+					break
+
 		del self.samples
 		self.samples = filtered
 
@@ -130,7 +136,7 @@ def my_concept_fwdpass(sample, clip_model, model, memory, progressbar, epoch, in
 	images_dif = images_dif.to(device)
 
 	# run difference model
-	z_dif, _ = model(task_ids, images_dif, txt_lesson.repeat(images_sim.shape[0], 1))
+	z_dif, _ = model(task_ids, images_dif, txt_lesson.repeat(images_dif.shape[0], 1))
 	loss_dif = get_sim_not_loss(centroid_sim, z_dif)
 
 	# compute loss
