@@ -165,7 +165,8 @@ def my_clip_train(rank, checkpoint, resume_iter, world_size, in_path, out_path, 
 	# Training the model
 	model = CLIP_AE_Encode(hidden_dim=hidden_dim_clip, latent_dim=latent_dim).to(rank)
 	# n_concepts = len(colors) + len(shapes) + len(materials)
-	n_concepts = 6 # color, material, shape, and, or, not
+	# n_concepts = 6 # color, material, shape, and, or, not
+	n_concepts = config["n_concepts"]
 	n_tasks = len(TASK_IDS.keys()) # and, or, not
 	model = SkilledMixin(
 		model=model,
@@ -243,6 +244,7 @@ argparser.add_argument('--model_name', '-n', default='complex_model',
 argparser.add_argument('--accumulation_steps', type=int)
 argparser.add_argument('--lr', type=float)
 argparser.add_argument('--epochs', type=int)
+argparser.add_argument('--n_concepts', type=int)
 
 argparser.add_argument('--checkpoint', '-w', default=None, help='Resume from checkpoint', type=str, required=False)
 argparser.add_argument('--resume_iter', '-ri', default=None, help='Resume from given iteration', type=int, required=False)
@@ -253,6 +255,7 @@ resume_iter = args.resume_iter
 config = {
 	"lr": args.lr,
 	"epochs": args.epochs,
+	"n_concepts": args.n_concepts,
 	"accumulation_steps": args.accumulation_steps,
 }
 # Running
