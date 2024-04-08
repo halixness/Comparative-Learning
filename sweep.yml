@@ -6,8 +6,8 @@ parameters:
   accumulation_steps:
     values:
       - 128
-      - 1024
-      - 2048
+      - 256
+      - 512
   epochs:
     value: 1
   lr:

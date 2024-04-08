@@ -141,7 +141,7 @@ def my_concept_fwdpass(sample, clip_model, model, memory, progressbar, epoch, in
 
 	# compute loss
 	loss = (loss_sim)**2 + (loss_dif-1)**2
-	textual_loss = -F.cosine_similarity(z_lesson[0].unsqueeze(0), centroid_sim).mean()
+	textual_loss = 1-F.cosine_similarity(z_lesson[0].unsqueeze(0), centroid_sim).mean()
 	loss += textual_loss
 
 	log = {
