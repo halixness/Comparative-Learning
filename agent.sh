@@ -1,3 +1,3 @@
 eval "$(conda shell.bash hook)"
-conda activate semantic_models
+conda activate comparative_learning
 wandb agent $1

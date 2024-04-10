@@ -127,7 +127,8 @@ def my_concept_fwdpass(sample, clip_model, model, memory, progressbar, epoch, in
 	images_sim = images_sim.to(device)
 	
 	# run similar model
-	z_sim, z_lesson = model(task_ids, images_sim, txt_lesson.repeat(images_sim.shape[0], 1))
+	txt_lesson = txt_lesson.repeat(images_sim.shape[0], 1).unsqueeze(1)
+	z_sim, z_lesson = model(task_ids, images_sim, txt_lesson)
 	centroid_sim = centroid_sim.detach() # 1, 16
 	centroid_sim, loss_sim = get_sim_loss(torch.vstack((z_sim, centroid_sim)))
 
@@ -136,13 +137,13 @@ def my_concept_fwdpass(sample, clip_model, model, memory, progressbar, epoch, in
 	images_dif = images_dif.to(device)
 
 	# run difference model
-	z_dif, _ = model(task_ids, images_dif, txt_lesson.repeat(images_dif.shape[0], 1))
+	z_dif, _ = model(task_ids, images_dif, txt_lesson)
 	loss_dif = get_sim_not_loss(centroid_sim, z_dif)
+	centroid_dif = torch.mean(z_dif, dim=0).unsqueeze(0)
 
-	# compute loss
-	loss = (loss_sim)**2 + (loss_dif-1)**2
-	textual_loss = 1-F.cosine_similarity(z_lesson[0].unsqueeze(0), centroid_sim).mean()
-	loss += textual_loss
+	# contrasting sim batch to diff batch wrt. textual encoding
+	textual_loss = F.mse_loss(z_lesson[0].unsqueeze(0), centroid_sim)**2 + (F.mse_loss(z_lesson[0].unsqueeze(0), centroid_dif)-1)**2
+	loss = (loss_sim)**2 + (loss_dif-1)**2 + textual_loss
 
 	log = {
 		"train/loss": loss.detach().item(),
@@ -153,7 +154,8 @@ def my_concept_fwdpass(sample, clip_model, model, memory, progressbar, epoch, in
 		"centroid": torch.mean(centroid_sim.detach())
 	}
 
-	wandb.log(log)
+	try: wandb.log(log) # don't bother
+	except: pass
 	progressbar.set_description(f"epoch: {epoch}; loss: {loss.detach().item():.4f}; task_id: {sample['task_id']}; lesson: {lesson}")
 
 	############ save model #########
@@ -164,14 +166,10 @@ def my_concept_fwdpass(sample, clip_model, model, memory, progressbar, epoch, in
 def my_clip_train(rank, checkpoint, resume_iter, world_size, in_path, out_path, model_name, source, config):  
 	
 	clip_model, _ = clip.load("ViT-B/32", device=device)
-
 	# Training data
 	training_data = TorchDataset(in_path=in_path)
-
 	# Training the model
 	model = CLIP_AE_Encode(hidden_dim=hidden_dim_clip, latent_dim=latent_dim).to(rank)
-	# n_concepts = len(colors) + len(shapes) + len(materials)
-	# n_concepts = 6 # color, material, shape, and, or, not
 	n_concepts = config["n_concepts"]
 	n_tasks = len(TASK_IDS.keys()) # and, or, not
 	model = SkilledMixin(
@@ -186,7 +184,7 @@ def my_clip_train(rank, checkpoint, resume_iter, world_size, in_path, out_path, 
 		print(f"[+] Loading from checkpoint: {checkpoint}")
 		model.load_state_dict(torch.load(checkpoint))
 
-	# inductive bias as in the paper
+	# Inductive bias as in the paper
 	lr_skills = config["lr"]
 	lr_allocation = lr_skills * 1e2 # 1e-2
 	print(f"[-] LR skills: {lr_skills}; LR task allocation: {lr_allocation}")
@@ -205,13 +203,11 @@ def my_clip_train(rank, checkpoint, resume_iter, world_size, in_path, out_path, 
 		],
 		lr=lr_skills,
 	)
-
 	# Start training run
 	best_nt = 0
 	t_tot = 0
 	memory = {}
 	if resume_iter: print(f"[+] Resuming from iter: {resume_iter}")
-
 	accumulation_steps = config["accumulation_steps"]
 	epochs = config["epochs"]
 	for epoch in range(epochs):
@@ -228,7 +224,6 @@ def my_clip_train(rank, checkpoint, resume_iter, world_size, in_path, out_path, 
 				loss.backward()
 				optimizer.step()
 			idx += 1
-
 		# Save model snapshot
 		torch.save(model.state_dict(), f"polytropon_e{epoch}_{time.strftime('%Y%m%d-%H%M%S')}.pth")
 
@@ -236,25 +231,22 @@ def my_clip_train(rank, checkpoint, resume_iter, world_size, in_path, out_path, 
 argparser = argparse.ArgumentParser()
 argparser.add_argument('--in_path', '-i',
 			help='Data input path', default="/mnt/cimec-storage6/shared/filippo_diego_datasets/my_datasets")
-
 argparser.add_argument('--out_path', '-o',
 			help='Model memory output path', default="out")
-
 argparser.add_argument('--run_name', '-r',
 			help='Model memory output path', default="polytropon", type=str)
-
 argparser.add_argument('--model_name', '-n', default='complex_model',
 			help='Best model memory to be saved file name')
-
-
+argparser.add_argument('--checkpoint', '-w', default=None, 
+			help='Resume from checkpoint', type=str, required=False)
+argparser.add_argument('--resume_iter', '-ri', default=None, 
+			help='Resume from given iteration', type=int, required=False)
+# Required
 argparser.add_argument('--accumulation_steps', type=int)
 argparser.add_argument('--lr', type=float)
 argparser.add_argument('--epochs', type=int)
 argparser.add_argument('--n_concepts', type=int)
-
-argparser.add_argument('--checkpoint', '-w', default=None, help='Resume from checkpoint', type=str, required=False)
-argparser.add_argument('--resume_iter', '-ri', default=None, help='Resume from given iteration', type=int, required=False)
-
+argparser.add_argument('--offline', type=bool, default=False)
 args = argparser.parse_args()
 checkpoint = args.checkpoint
 resume_iter = args.resume_iter
@@ -264,6 +256,6 @@ config = {
 	"n_concepts": args.n_concepts,
 	"accumulation_steps": args.accumulation_steps,
 }
-# Running
-wandb.init(project="complex-concept-learning", name="agent")
+# Run
+if args.offline != True: wandb.init(project="complex-concept-learning", name="agent")
 my_clip_train(0, checkpoint, resume_iter, 1, args.in_path, args.out_path, args.model_name, 'train/', config)
